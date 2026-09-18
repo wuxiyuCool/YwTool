@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SgOps · 批量运维管理平台</title>
+    <link rel="stylesheet" href="./styles/main.css">
+</head>
+<body>
+    <div class="app">
+        <aside class="sidebar">
+            <div class="brand">
+                <div class="brand-logo">Sg</div>
+                <div class="brand-name">SgOps<span>批量运维管理平台</span></div>
+            </div>
+            <nav class="nav" id="nav"></nav>
+            <!-- AI 常驻入口（渐变卡）：点击展开右侧工作台，Shift+A 随时唤起 -->
+            <div class="ai-entry" id="ai-entry" style="display:none" title="AI 运维助手 · Shift+A">
+                <div class="ai-entry-icon">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/><path d="M19 15l.9 2.1L22 18l-2.1.9L19 21l-.9-2.1L16 18l2.1-.9z"/></svg>
+                </div>
+                <div class="ai-entry-meta">
+                    <strong>AI 运维助手</strong>
+                    <span>Shift + A · 随时唤起</span>
+                </div>
+                <svg class="ai-entry-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+            </div>
+            <div class="sidebar-footer">
+                <div class="user-chip" id="sidebar-user"></div>
+                <div class="version">v1.1.0 · 本地部署</div>
+            </div>
+        </aside>
+        <div class="main">
+            <header class="topbar">
+                <div class="page-title">
+                    <nav class="crumbs" id="breadcrumb" aria-label="页面位置"></nav>
+                    <h1 id="page-title">总览</h1>
+                    <p id="page-sub">平台运行概览</p>
+                </div>
+                <div class="topbar-right">
+                    <span class="status-pill online"><i></i>本地服务 · 已连接</span>
+                    <div class="bell-wrap">
+                        <button class="icon-btn" id="btn-alerts" title="告警中心">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+                            <span class="bell-badge" id="alert-badge" style="display:none">0</span>
+                        </button>
+                        <div class="dropdown" id="alert-dropdown"></div>
+                    </div>
+                    <div class="topbar-user" id="topbar-user"></div>
+                </div>
+            </header>
+            <div class="main-body">
+                <main class="content" id="content"></main>
+
+                <!-- AI 常驻工作台（480px，推挤主内容不遮挡） -->
+                <aside class="ai-panel" id="ai-panel">
+                    <div class="ai-panel-head">
+                        <div class="ai-panel-title">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/><path d="M19 15l.9 2.1L22 18l-2.1.9L19 21l-.9-2.1L16 18l2.1-.9z"/></svg>
+                            <strong>AI 运维助手</strong>
+                            <span class="ai-panel-model" id="ai-model-tag" style="display:none"></span>
+                        </div>
+                        <div class="ai-panel-actions">
+                            <button class="icon-btn" id="ai-sessions" title="历史会话">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9"/><polyline points="3 4 3 9 8 9"/><polyline points="12 7 12 12 15.5 13.5"/></svg>
+                            </button>
+                            <button class="icon-btn" id="ai-clear" title="清空当前会话">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>
+                            </button>
+                            <button class="icon-btn" id="ai-close" title="收起 (Shift+A)">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="15" y1="4" x2="15" y2="20"/><polyline points="10 9 8 12 10 15"/></svg>
+                            </button>
+                        </div>
+                    </div>
+                    <!-- 宽度拖拽柄（左侧贴边，拖动调整工作台宽度） -->
+                    <div class="ai-resizer" id="ai-resizer" title="拖动调整 AI 工作台宽度（300 - 720px）"></div>
+                    <div class="ai-panel-bar">
+                        <div class="ai-bar-item ai-bar-model">
+                            <span class="ai-bar-label">模型</span>
+                            <select class="select" id="ai-model-select" title="切换本次会话使用的模型"></select>
+                        </div>
+                        <div class="ai-bar-item ai-bar-agent" id="ai-agent-wrap" title="开启后 AI 可调用平台工具：查询主机 / 生成测试数据 / 保存脚本 / 执行命令 / 查询数据源">
+                            <span class="ai-bar-label">Agent</span>
+                            <label class="switch">
+                                <input type="checkbox" id="ai-agent-switch">
+                                <span class="track"></span>
+                            </label>
+                        </div>
+                    </div>
+                    <div class="ai-context" id="ai-context" style="display:none">
+                        <span class="ai-context-label">上下文</span>
+                        <span class="ai-context-tag" id="ai-context-text"></span>
+                        <button class="ai-context-close" id="ai-context-close" title="移除上下文">×</button>
+                    </div>
+                    <div class="ai-confirm" id="ai-confirm" style="display:none">
+                        <span>确认清空当前会话？该操作不可恢复</span>
+                        <button class="btn btn-danger btn-sm" id="ai-confirm-yes">确认清空</button>
+                        <button class="btn btn-ghost btn-sm" id="ai-confirm-no">取消</button>
+                    </div>
+                    <div class="ai-sessions-pop" id="ai-sessions-pop">
+                        <div class="ai-sessions-head">
+                            <strong>历史会话</strong>
+                            <button class="btn-link" id="ai-session-new">+ 新会话</button>
+                        </div>
+                        <div class="ai-sessions-list" id="ai-sessions-list"></div>
+                    </div>
+                    <div class="ai-chat" id="ai-chat"><div class="ai-empty">加载中...</div></div>
+                    <div class="ai-quick" id="ai-quick"></div>
+                    <div class="ai-input-bar">
+                        <textarea class="ai-input" id="ai-input" rows="2" placeholder="描述你的运维问题，AI 会结合当前页面上下文回答…"></textarea>
+                        <button class="btn btn-primary" id="ai-send">发送</button>
+                    </div>
+                    <div class="ai-foot-hint">Enter 发送 · Shift+Enter 换行 · 回答仅供参考，执行前请人工确认</div>
+                </aside>
+            </div>
+        </div>
+    </div>
+
+    <!-- 登录覆盖层（未登录时由 session.js 渲染内容） -->
+    <div class="login-screen" id="login-screen" style="display:none"></div>
+
+    <script type="module" src="./router.js"></script>
+</body>
+</html>
