@@ -462,9 +462,12 @@ function transformValue(value, transform, fallback) {
 /**
  * 按映射把源行转换为目标行
  * @param {object} row 源行
- * @param {Array<{from?:string,to?:string,transform?:string,default?:any}>} mapping
+ * @param {Array<{from?:string,to?:string,transform?:string,default?:any,cast?:string}>} mapping
+ *        cast：目标列类型强转（string/number/integer/boolean/date），用于源格式与目标类型不一致时的手动修正
  * @param {{emptyAsNull?:boolean}} options
  */
+const CAST_NAMES = new Set(['string', 'number', 'integer', 'boolean', 'date']);
+
 function applyMapping(row, mapping, options = {}) {
     const emptyAsNull = options.emptyAsNull !== false;
     const out = {};
@@ -478,8 +481,74 @@ function applyMapping(row, mapping, options = {}) {
         if ((v === null || v === '') && m.default !== undefined && m.default !== null && m.default !== '') {
             v = transformValue(m.default, m.transform === 'const' ? 'none' : m.transform);
         }
+        // 类型强转：把值收敛到目标列类型（转换失败按 transformValue 语义写 NULL / 默认值）
+        if (m.cast && CAST_NAMES.has(m.cast) && v !== null && v !== undefined) {
+            v = transformValue(v, m.cast, m.default);
+        }
         if (emptyAsNull && v === '') v = null;
         out[m.to] = v === undefined ? null : v;
+    });
+    return out;
+}
+
+/* ---------------- 类型兼容性检查（试运行告警 / 前端标色共用规则） ---------------- */
+
+/** 数据库列类型字符串 → 类别 */
+function classOfDbType(t) {
+    const s = String(t || '').toLowerCase();
+    if (/bool|^bit$|bit\(/.test(s)) return 'boolean';
+    if (/int|number|numeric|decimal|float|double|real|money|serial/.test(s)) return 'number';
+    if (/date|time|year/.test(s)) return 'date';
+    if (/blob|raw|bytea|binary|image/.test(s)) return 'binary';
+    return 'string';
+}
+
+/** 推断出的源类型 → 类别 */
+const SRC_CLASS = { integer: 'number', number: 'number', datetime: 'date', boolean: 'boolean', string: 'string', empty: null };
+
+/**
+ * 兼容性判定：ok（可直接写）/ cast（格式不一致，需强转，给出建议）/ risk（大概率写入失败）
+ * @param {string} srcType 源列推断类型（inferType 输出）
+ * @param {string} tgtDbType 目标列数据库类型
+ * @param {string} transform 已选转换规则
+ * @param {string} cast 已选类型强转
+ */
+function typeCompat(srcType, tgtDbType, transform, cast) {
+    const src = SRC_CLASS[srcType];
+    const tgt = classOfDbType(tgtDbType);
+    if (!src || tgt === 'binary') return { level: 'ok' };
+    const effective = CAST_NAMES.has(cast) ? cast
+        : ['number', 'integer', 'date', 'boolean', 'string'].includes(transform) ? transform : null;
+    const effClass = effective ? SRC_CLASS[effective === 'integer' ? 'integer' : effective] || (effective === 'date' ? 'date' : effective) : null;
+    if (src === tgt) return { level: 'ok' };
+    // 任何类型 → 文本列：数据库普遍隐式转换
+    if (tgt === 'string') return { level: 'ok' };
+    if (effClass && effClass === tgt) return { level: 'ok' };
+    // 文本 → 数字/日期/布尔：可强转（脏值写 NULL）
+    if (src === 'string') {
+        const suggest = { number: 'number', date: 'date', boolean: 'boolean' }[tgt] || 'string';
+        return { level: 'cast', suggest };
+    }
+    // 数字 → 日期 等跨类：写入基本会失败
+    return { level: 'risk' };
+}
+
+/** 试运行阶段：按样例数据推断源类型，与目标列类型比对生成告警 */
+function typeWarningsFor(mapping, rawRows, targetColDefs) {
+    if (!Array.isArray(targetColDefs) || !targetColDefs.length) return [];
+    const out = [];
+    (mapping || []).forEach(m => {
+        if (!m || !m.from || !m.to) return;
+        const tgt = targetColDefs.find(c => String(c.name || '').toLowerCase() === String(m.to).toLowerCase());
+        if (!tgt) return;
+        const values = (rawRows || []).map(r => r[m.from]);
+        const srcType = inferType(values);
+        const compat = typeCompat(srcType, tgt.type, m.transform, m.cast);
+        if (compat.level === 'cast') {
+            out.push(`类型不一致：「${m.from}」(文本) → 「${m.to}」(${tgt.type})，建议在映射行选择「转为${compat.suggest === 'date' ? '日期' : compat.suggest === 'number' ? '数值' : compat.suggest === 'boolean' ? '布尔' : '文本'}」；无法转换的值将写 NULL`);
+        } else if (compat.level === 'risk') {
+            out.push(`类型不兼容：「${m.from}」(${srcType}) → 「${m.to}」(${tgt.type})，写入可能报错，请调整映射或强转类型`);
+        }
     });
     return out;
 }
@@ -792,6 +861,7 @@ async function runEtl(task = {}, ctx = {}) {
     let targetDb = null;
     let targetTable = '';
     let targetColumnNames = [];
+    let targetColDefs = [];
     let filePath = '';
     let format = 'csv';
 
@@ -802,7 +872,10 @@ async function runEtl(task = {}, ctx = {}) {
         targetTable = String(target.table || '').trim();
         if (!IDENT.test(targetTable)) return { ok: false, message: '请选择合法的目标表' };
         const desc = await describeTarget(target);
-        if (desc.ok) targetColumnNames = (desc.columns || []).map(c => c.name);
+        if (desc.ok) {
+            targetColumnNames = (desc.columns || []).map(c => c.name);
+            targetColDefs = desc.columns || [];
+        }
     } else {
         filePath = String(target.filePath || '');
         format = FILE_FORMATS.includes(target.format) ? target.format : 'csv';
@@ -833,12 +906,17 @@ async function runEtl(task = {}, ctx = {}) {
     // ---- 4. 试运行 ----
     if (options.dryRun) {
         let sampleRows = [];
+        let rawRows = [];
         if (source.kind === 'db') {
             const res = stripRowNum(await dbAdapters.query(source.db, paginate(source.db.type, source.baseSql, 0, 3)));
-            sampleRows = applyMappingList(res.rows || [], mapping, options);
+            rawRows = res.rows || [];
+            sampleRows = applyMappingList(rawRows, mapping, options);
         } else {
-            sampleRows = applyMappingList((source.rows || []).slice(0, 3), mapping, options);
+            rawRows = (source.rows || []).slice(0, 3);
+            sampleRows = applyMappingList(rawRows, mapping, options);
         }
+        // 类型一致性检查：按样例推断源类型并与目标列比对（可强转的给建议，跨类的给风险告警）
+        warnings.push(...typeWarningsFor(mapping, rawRows, targetColDefs));
         const planned = source.kind === 'db' ? limit : (source.rows || []).length;
         const batchSize = writeBatchSize(targetDb, options, Math.max(1, targetColumns.length));
         const plan = {
@@ -1071,5 +1149,6 @@ module.exports = {
     // 解析与转换（供自检使用）
     parseDelimited, parseJson, parseSqlInserts, parseContent, detectDelimiter, inferType,
     transformValue, applyMapping, validateMapping, normalizeDate,
+    typeCompat, typeWarningsFor, classOfDbType,
     csvEscape, sqlLiteral, insertStatement, paginate, stripRowNum, buildBatch
 };

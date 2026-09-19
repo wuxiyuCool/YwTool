@@ -29,6 +29,53 @@ const TRANSFORMS = [
 const TYPE_BADGE = { integer: 'blue', number: 'blue', boolean: 'purple', datetime: 'amber', string: 'gray', empty: 'gray' };
 const TYPE_TEXT = { integer: '整数', number: '数值', boolean: '布尔', datetime: '日期', string: '文本', empty: '空' };
 
+/** 类型强转选项（与主进程 CAST_NAMES 一致；用于源格式与目标列类型不一致时的手动修正） */
+const CASTS = [
+    { value: '', label: '自动' },
+    { value: 'string', label: '转文本' },
+    { value: 'integer', label: '转整数' },
+    { value: 'number', label: '转数值' },
+    { value: 'boolean', label: '转布尔' },
+    { value: 'date', label: '转日期' }
+];
+
+/** 数据库列类型 → 类别（与主进程 classOfDbType 同规则） */
+const classOfDbType = t => {
+    const s = String(t || '').toLowerCase();
+    if (/bool|^bit$|bit\(/.test(s)) return 'boolean';
+    if (/int|number|numeric|decimal|float|double|real|money|serial/.test(s)) return 'number';
+    if (/date|time|year/.test(s)) return 'date';
+    if (/blob|raw|bytea|binary|image/.test(s)) return 'binary';
+    return 'string';
+};
+const SRC_CLASS = { integer: 'number', number: 'number', datetime: 'date', boolean: 'boolean', string: 'string', empty: null };
+const CAST_CLASS = { string: 'string', integer: 'number', number: 'number', boolean: 'boolean', date: 'date' };
+
+/**
+ * 单条映射的类型兼容性：ok / cast（建议强转）/ risk（跨类，写入易失败）
+ * 依据：源列推断类型（preview.columns）× 目标列数据库类型（targetColumns）× 已选转换/强转
+ */
+function compatOf(m) {
+    const srcCol = ((state.preview && state.preview.columns) || []).find(c => c.name === m.from);
+    const tgtCol = (state.targetColumns || []).find(c => String(c.name || '').toLowerCase() === String(m.to || '').toLowerCase());
+    const out = { level: 'ok', suggest: '', tgtType: tgtCol ? tgtCol.type : '' };
+    if (!srcCol || !tgtCol || state.target.kind !== 'db') return out;
+    const src = SRC_CLASS[srcCol.type];
+    const tgt = classOfDbType(tgtCol.type);
+    if (!src || tgt === 'binary') return out;
+    const eff = m.cast ? CAST_CLASS[m.cast]
+        : ['number', 'integer', 'date', 'boolean', 'string'].includes(m.transform) ? CAST_CLASS[m.transform] : null;
+    if (src === tgt || tgt === 'string') return out;
+    if (eff && eff === tgt) return out;
+    if (src === 'string') {
+        out.level = 'cast';
+        out.suggest = { number: 'number', date: 'date', boolean: 'boolean' }[tgt] || 'string';
+        return out;
+    }
+    out.level = 'risk';
+    return out;
+}
+
 const MODE_HINT = {
     insert: '追加写入；主键/唯一键冲突时该批失败',
     upsert: 'MySQL：ON DUPLICATE KEY 更新非键列；PostgreSQL：ON CONFLICT DO UPDATE（需填键列）；Oracle 暂不支持',
@@ -251,7 +298,7 @@ export function render() {
                         <span class="muted" id="etl-map-status" style="font-size:12px"></span>
                     </div>
                     <div class="etl-map-head">
-                        <span>源字段</span><span>转换规则</span><span>目标字段 / 默认值</span><span></span>
+                        <span>源字段</span><span>转换规则</span><span>类型强转</span><span>目标字段 / 默认值</span><span></span>
                     </div>
                     <div id="etl-mapping"><div class="empty">请先在上一步「读取并预览」源数据</div></div>
                     <div id="etl-map-warn"></div>
@@ -559,6 +606,7 @@ function collectMapping() {
     el.mapping.querySelectorAll('.etl-map-row').forEach(row => {
         const fromEl = row.querySelector('.etl-m-from');
         const trEl = row.querySelector('.etl-m-transform');
+        const castEl = row.querySelector('.etl-m-cast');
         const toEl = row.querySelector('.etl-m-to');
         const defEl = row.querySelector('.etl-m-default');
         const transform = trEl ? trEl.value : 'none';
@@ -566,6 +614,7 @@ function collectMapping() {
             from: transform === 'const' ? null : (fromEl ? fromEl.value || null : null),
             to: toEl ? (toEl.value || '') : '',
             transform,
+            cast: castEl && castEl.value ? castEl.value : undefined,
             default: defEl && defEl.value !== '' ? defEl.value : undefined
         });
     });
@@ -580,12 +629,16 @@ function autoMap(notify = true) {
     // 库目标：按列名匹配（匹配不上的留空由用户指定）；文件目标：同名输出
     state.mapping = srcCols.map(col => {
         const hit = (tgtCols || []).find(c => normalize(c.name) === normalize(col.name));
-        return {
+        const entry = {
             from: col.name,
             to: tgtCols ? (hit ? hit.name : '') : col.name,
             transform: suggestTransform(col.type),
+            cast: undefined,
             default: undefined
         };
+        const compat = compatOf(entry);
+        if (compat.level === 'cast' && compat.suggest) entry.cast = compat.suggest;
+        return entry;
     });
     paintMapping();
     if (notify) toast('已按列名自动匹配', 'success');
@@ -613,9 +666,13 @@ function paintMapping() {
     }
     const isDbTarget = state.target.kind === 'db';
     const dbTargets = targetNames();
+    const srcTypeOf = name => (srcCols.find(c => c.name === name) || {}).type || 'string';
 
     el.mapping.innerHTML = state.mapping.map((m, idx) => {
         const isConst = m.transform === 'const';
+        const compat = compatOf(m);
+        const rowCls = compat.level === 'risk' ? ' compat-risk'
+            : (compat.level === 'cast' && !m.cast) ? ' compat-cast' : '';
         const fromOptions = srcCols.map(c =>
             `<option value="${esc(c.name)}"${!isConst && c.name === m.from ? ' selected' : ''}>${esc(c.name)}</option>`).join('');
         const toControl = isDbTarget
@@ -625,13 +682,19 @@ function paintMapping() {
                    ${m.to && !dbTargets.includes(m.to) ? `<option value="${esc(m.to)}" selected>${esc(m.to)}（表中无此列）</option>` : ''}
                </select>`
             : `<input class="input mono etl-m-to" value="${esc(m.to || '')}" placeholder="输出列名">`;
+        const castControl = isDbTarget
+            ? `<select class="select etl-m-cast" title="${compat.level === 'cast' && !m.cast ? `源为文本、目标为 ${esc(compat.tgtType)}：建议选择「${esc((CASTS.find(c => c.value === compat.suggest) || {}).label || '转文本')}」，脏值将写 NULL` : '目标列类型与源格式不一致时可在此手动修正'}">
+                   ${CASTS.map(c => `<option value="${c.value}"${(m.cast || '') === c.value ? ' selected' : ''}>${c.label}</option>`).join('')}
+               </select>`
+            : '<span class="muted" style="font-size:11.5px">文件目标无需</span>';
 
         return `
-        <div class="etl-map-row" data-idx="${idx}">
+        <div class="etl-map-row${rowCls}" data-idx="${idx}">
             <div class="etl-map-cell">
                 ${isConst
                 ? '<span class="badge purple" style="font-size:11px">常量</span>'
                 : `<select class="select etl-m-from">${fromOptions}</select>
+                       ${typeBadge(srcTypeOf(m.from))}
                        <span class="muted mono etl-map-sample">${esc(sampleValueOf(m.from))}</span>`}
             </div>
             <div class="etl-map-cell">
@@ -640,7 +703,13 @@ function paintMapping() {
                 </select>
             </div>
             <div class="etl-map-cell">
+                ${castControl}
+                ${compat.level === 'risk' ? '<span class="badge red" style="font-size:10px" title="源与目标类型跨类，写入大概率失败">不兼容</span>'
+                : compat.level === 'cast' && !m.cast ? '<span class="badge amber" style="font-size:10px" title="格式与类型不一致，请选择强转">需转换</span>' : ''}
+            </div>
+            <div class="etl-map-cell">
                 ${toControl}
+                ${isDbTarget && compat.tgtType ? `<span class="muted mono etl-ttype" title="目标列类型">${esc(compat.tgtType)}</span>` : ''}
                 <input class="input mono etl-m-default" value="${esc(m.default === undefined || m.default === null ? '' : m.default)}"
                        placeholder="${isConst ? '固定值' : '默认值(可空)'}">
             </div>
@@ -661,6 +730,16 @@ function paintMapping() {
         const used = state.mapping.filter(m => m.to).map(m => m.to);
         const dup = [...new Set(used.filter((v, i) => used.indexOf(v) !== i))];
         if (dup.length) warn.push('目标列重复映射：' + dup.join('、'));
+        // 类型一致性汇总
+        const casts = [];
+        const risks = [];
+        state.mapping.filter(m => m.to).forEach(m => {
+            const c = compatOf(m);
+            if (c.level === 'cast' && !m.cast) casts.push(`${m.from} → ${m.to}(${c.tgtType})`);
+            if (c.level === 'risk') risks.push(`${m.from} → ${m.to}(${c.tgtType})`);
+        });
+        if (casts.length) warn.push(`类型不一致（建议在「类型强转」列选择转换，脏值将写 NULL）：${casts.join('、')}`);
+        if (risks.length) warn.push(`类型不兼容（写入可能报错，请调整映射）：${risks.join('、')}`);
     }
     el.mapWarn.innerHTML = warn.length
         ? `<div class="alert warn" style="margin-top:12px"><span>${warn.map(esc).join('<br>')}</span></div>`
@@ -1022,7 +1101,7 @@ export async function mount(root) {
             return;
         }
         collectMapping();
-        if (e.target.classList.contains('etl-m-to')) paintMapping();
+        if (e.target.classList.contains('etl-m-to') || e.target.classList.contains('etl-m-cast')) paintMapping();
     });
     el.mapping.addEventListener('input', e => {
         if (e.target.classList.contains('etl-m-default')) collectMapping();
