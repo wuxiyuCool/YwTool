@@ -28,8 +28,10 @@ const PAGES = [
 
     { id: 'dbconfig', label: '数据库配置', domain: 'database', module: 'dbconfig' },
     { id: 'sql', label: 'SQL 工作台', domain: 'database', module: 'sqltools' },
+    { id: 'etl', label: '数据集成', domain: 'database', module: 'etl' },
 
     { id: 'accounts', label: '多系统账号', domain: 'system', module: 'accounts' },
+    { id: 'ledger', label: '凭据台账', domain: 'system', module: 'ledger' },
     { id: 'sensitive', label: '敏感词配置', domain: 'system', module: 'rules' },
     { id: 'audit', label: '日志审计', domain: 'system', module: 'audit' },
     { id: 'aiconfig', label: 'AI 配置', domain: 'system', module: 'ai' },

@@ -36,6 +36,11 @@ desktop.ini
 *.pem
 *.p12
 
+# SgOps 配置备份（信封已口令加密，仍默认禁止误提交入库）
+SgOps-backup-*.json
+backups/
+*.sgopsbak
+
 # ---------------- 本地运行数据与开发脚本 ----------------
 # 含审计日志、本地库、自检脚本与备份，属机器本地状态
 .workbuddy/

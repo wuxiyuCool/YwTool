@@ -15,12 +15,14 @@ const IPC_MODULES = [
     './handlers/taskHandler',
     './handlers/scriptHandler',
     './handlers/accountHandler',
+    './handlers/ledgerHandler',
     './handlers/auditHandler',
     './handlers/alertHandler',
     './handlers/scheduleHandler',
     './handlers/dbHandler',
     './handlers/dbConfigHandler',
     './handlers/systemHandler',
+    './handlers/backupHandler',
     './handlers/dashboardHandler',
     './handlers/aiHandler'
 ];
@@ -92,7 +94,6 @@ function createWindow() {
     menu.attach(mainWindow);
 
     mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
-    mainWindow.webContents.openDevTools();
 }
 
 app.whenReady().then(() => {

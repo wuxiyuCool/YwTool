@@ -1,5 +1,5 @@
 /**
- * 数据集成（ETL）· 类 Kettle 的库对库 / 文件对库 / 库对文件
+ * 数据集成（ETL）· 独立页面 · 类 Kettle 的库对库 / 文件对库 / 库对文件
  *
  * 四步向导：
  *   ① 选择源（数据库表 / 查询 / CSV|JSON|SQL|Excel 文件 / 粘贴文本）
@@ -8,9 +8,10 @@
  *   ④ 试运行 / 执行（进度条 + 统计 + 错误明细），可保存为任务复用
  *
  * 与主进程 main/etl.js 对应；大文件内容不经过渲染进程，只回传解析出的列与样例行。
+ * 数据源清单自行拉取（api.dbConfig.list），不再依赖 SQL 工作台注入。
  */
-import { api } from './api.js';
-import { esc, toast, guardAdmin } from './ui.js';
+import { api, demoMode } from '../api.js';
+import { esc, toast, demoBanner, guardAdmin, applyReadonly } from '../ui.js';
 
 const TRANSFORMS = [
     { value: 'none', label: '直接写入' },
@@ -35,7 +36,7 @@ const MODE_HINT = {
 };
 
 let el = {};
-let ctx = null;
+let sources = [];        // 数据源清单（mount 时拉取）
 let unsubProgress = null;
 
 const state = {
@@ -58,26 +59,28 @@ const typeBadge = t => `<span class="badge ${TYPE_BADGE[t] || 'gray'}" style="fo
 
 export function render() {
     return `
-    <div class="modal-mask" id="etl-modal">
-        <div class="modal etl-modal">
-            <div class="modal-header">
-                <h3>数据集成 · 库对库 / 文件对库 / 库对文件</h3>
-                <div class="etl-head-actions">
-                    <select class="select" id="etl-task-list" title="加载已保存的任务"></select>
-                    <button class="btn btn-ghost btn-sm" id="etl-task-save" data-write>保存为任务</button>
-                    <button class="btn btn-ghost btn-sm" id="etl-task-del" data-write>删除</button>
-                    <button class="modal-close" data-close>×</button>
-                </div>
+    ${demoBanner(demoMode)}
+    <div class="card etl-page">
+        <div class="card-header">
+            <div>
+                <div class="card-title">数据集成向导</div>
+                <div class="card-desc">库对库 / 文件对库 / 库对文件 · 大文件仅在主进程解析 · 执行与任务保存仅系统管理员可操作</div>
             </div>
-
-            <div class="etl-steps" id="etl-steps">
-                <div class="etl-step active" data-step="1"><i>1</i><span>选择源</span></div>
-                <div class="etl-step" data-step="2"><i>2</i><span>选择目标</span></div>
-                <div class="etl-step" data-step="3"><i>3</i><span>字段映射</span></div>
-                <div class="etl-step" data-step="4"><i>4</i><span>试运行 / 执行</span></div>
+            <div class="etl-head-actions">
+                <select class="select" id="etl-task-list" title="加载已保存的任务"></select>
+                <button class="btn btn-ghost btn-sm" id="etl-task-save" data-write>保存为任务</button>
+                <button class="btn btn-ghost btn-sm" id="etl-task-del" data-write>删除</button>
             </div>
+        </div>
 
-            <div class="modal-body etl-body">
+        <div class="etl-steps" id="etl-steps">
+            <div class="etl-step active" data-step="1"><i>1</i><span>选择源</span></div>
+            <div class="etl-step" data-step="2"><i>2</i><span>选择目标</span></div>
+            <div class="etl-step" data-step="3"><i>3</i><span>字段映射</span></div>
+            <div class="etl-step" data-step="4"><i>4</i><span>试运行 / 执行</span></div>
+        </div>
+
+        <div class="etl-body etl-page-body">
                 <!-- ① 源 -->
                 <div class="etl-pane" data-pane="1">
                     <div class="form-row">
@@ -297,13 +300,11 @@ export function render() {
                 </div>
             </div>
 
-            <div class="modal-footer">
-                <button class="btn btn-ghost" id="etl-prev">上一步</button>
-                <button class="btn btn-primary" id="etl-next">下一步</button>
-                <div class="spacer"></div>
-                <span class="muted" id="etl-foot-status" style="font-size:12px"></span>
-                <button class="btn btn-ghost" data-close>关闭</button>
-            </div>
+        <div class="etl-page-foot">
+            <button class="btn btn-ghost" id="etl-prev">上一步</button>
+            <button class="btn btn-primary" id="etl-next">下一步</button>
+            <div class="spacer"></div>
+            <span class="muted" id="etl-foot-status" style="font-size:12px"></span>
         </div>
     </div>`;
 }
@@ -336,7 +337,6 @@ function footStatus(text) {
  * ------------------------------------------------------------------ */
 
 function fillSources() {
-    const sources = (ctx && ctx.getSources ? ctx.getSources() : []) || [];
     const options = sources.length
         ? sources.map(s => `<option value="${esc(s.id)}">${esc(s.name)}</option>`).join('')
         : '<option value="">暂无可用数据源</option>';
@@ -344,6 +344,16 @@ function fillSources() {
     el.tgtSource.innerHTML = options;
     if (state.source.sourceId) el.srcSource.value = state.source.sourceId;
     if (state.target.sourceId) el.tgtSource.value = state.target.sourceId;
+}
+
+async function loadSources() {
+    try {
+        const all = await api.dbConfig.list();
+        sources = Array.isArray(all) ? all : [];
+    } catch (err) {
+        sources = [];
+    }
+    fillSources();
 }
 
 async function loadTables(which) {
@@ -909,23 +919,9 @@ async function loadRuns(show = true) {
  * 挂载
  * ------------------------------------------------------------------ */
 
-export function open() {
-    if (!el.modal) return;
-    el.modal.classList.add('open');
-    fillSources();
-    loadTasks();
-    goStep(state.step || 1);
-}
-
-export function sync() {
-    if (el.srcSource) fillSources();
-}
-
-export async function mount(root, context) {
-    ctx = context || {};
+export async function mount(root) {
     const q = sel => root.querySelector(sel);
     el = {
-        modal: q('#etl-modal'),
         steps: [...root.querySelectorAll('.etl-step')],
         panes: [...root.querySelectorAll('.etl-pane')],
         prev: q('#etl-prev'), next: q('#etl-next'), footStatus: q('#etl-foot-status'),
@@ -955,7 +951,7 @@ export async function mount(root, context) {
         taskList: q('#etl-task-list'), taskSave: q('#etl-task-save'), taskDel: q('#etl-task-del')
     };
 
-    fillSources();
+    await loadSources();
     paintKindVisibility();
 
     /* 步骤导航 */
@@ -969,7 +965,6 @@ export async function mount(root, context) {
         if (state.step === 1 && !state.preview) toast('建议先「读取并预览」源数据', 'info');
         goStep(state.step + 1);
     });
-    root.querySelectorAll('[data-close]').forEach(node => node.addEventListener('click', () => el.modal.classList.remove('open')));
 
     /* 源配置 */
     el.srcKind.addEventListener('change', () => { paintKindVisibility(); });
@@ -1092,4 +1087,5 @@ export async function mount(root, context) {
     await loadTasks();
     await loadRuns(false);
     goStep(1);
+    applyReadonly(root);
 }

@@ -10,7 +10,6 @@
  */
 import { api, demoMode } from '../api.js';
 import { esc, toast, demoBanner, emptyRow, loadingRow, shortTime, guardAdmin, applyReadonly } from '../ui.js';
-import * as etl from '../etl.js';
 
 const MAX_ROWS_RENDER = 300;
 
@@ -245,7 +244,7 @@ export function render() {
                     </div>
                     <div style="display:flex;gap:8px;align-items:center">
                         <select class="select" id="exec-source" style="min-width:170px"></select>
-                        <button class="btn btn-ghost btn-sm" data-write id="btn-etl">数据集成</button>
+                        <button class="btn btn-ghost btn-sm" id="btn-etl" data-goto="etl" title="前往「数据集成」页执行库对库 / 文件对库同步">数据集成</button>
                         <button class="btn btn-primary btn-sm" data-write id="btn-run-sql">执行 (Ctrl+Enter)</button>
                     </div>
                 </div>
@@ -319,9 +318,7 @@ LIMIT 20;</textarea>
                 <button class="btn btn-primary" id="sql-save">保存</button>
             </div>
         </div>
-    </div>
-
-    ${etl.render()}`;
+    </div>`;
 }
 
 export async function mount(root) {
@@ -671,13 +668,6 @@ export async function mount(root) {
     });
 
     root.querySelector('#btn-reload-history').addEventListener('click', refreshHistory);
-
-    // 数据集成（ETL）：库对库 / 文件对库 / 库对文件，共享本页的数据源与选中库
-    await etl.mount(root, {
-        getSources: () => sources,
-        getActiveId: () => activeSourceId
-    });
-    root.querySelector('#btn-etl').addEventListener('click', () => etl.open());
 
     applyReadonly(root);
 

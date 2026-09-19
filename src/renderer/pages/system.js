@@ -151,6 +151,58 @@ export function render() {
         </div>
     </div>
 
+    <div class="card">
+        <div class="card-header">
+            <div>
+                <div class="card-title">备份与迁移</div>
+                <div class="card-desc">配置全量导出为口令加密文件（scrypt + AES-256-GCM）；密文信封可安全存放，忘记口令无法恢复</div>
+            </div>
+        </div>
+        <div class="grid-2">
+            <div>
+                <div class="form-item">
+                    <label>备份口令（至少 8 位）</label>
+                    <input class="input" type="password" id="bk-export-pass" autocomplete="new-password" placeholder="用于加密备份文件，导入时需要输入">
+                </div>
+                <div class="form-item">
+                    <label>确认口令</label>
+                    <input class="input" type="password" id="bk-export-pass2" autocomplete="new-password">
+                </div>
+                <label class="check-item"><input type="checkbox" id="bk-include-users" checked>
+                    <div><strong>包含用户与权限矩阵</strong><span class="muted" style="font-size:11.5px">登录口令为 scrypt 哈希，可跨机恢复</span></div>
+                </label>
+                <label class="check-item"><input type="checkbox" id="bk-include-history">
+                    <div><strong>包含执行历史</strong><span class="muted" style="font-size:11.5px">任务 / SQL / ETL 记录与告警（体积较大，默认不含）</span></div>
+                </label>
+                <div class="toolbar" style="margin-top:14px">
+                    <button class="btn btn-primary" data-write id="btn-bk-export">导出备份…</button>
+                    <span class="muted" id="bk-export-msg" style="font-size:12px"></span>
+                </div>
+            </div>
+            <div>
+                <div class="form-item">
+                    <label>备份口令</label>
+                    <input class="input" type="password" id="bk-import-pass" autocomplete="off" placeholder="输入导出时设置的口令">
+                </div>
+                <div class="form-item">
+                    <label>导入模式</label>
+                    <select class="select" id="bk-import-mode" style="width:100%">
+                        <option value="merge">合并（同 id 覆盖，其余追加）</option>
+                        <option value="replace">替换（集合整体覆盖）</option>
+                    </select>
+                    <div class="form-hint">导入前会自动保留当前库快照（.pre-import-*），出问题可手工回退</div>
+                </div>
+                <div class="alert warn" style="margin:6px 0 0">
+                    <span>「替换」会覆盖主机 / 数据源 / 账号等同名集合，执行前请确认。</span>
+                </div>
+                <div class="toolbar" style="margin-top:14px">
+                    <button class="btn btn-danger" data-write id="btn-bk-import">选择备份文件并导入…</button>
+                    <span class="muted" id="bk-import-msg" style="font-size:12px"></span>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <div class="grid-2">
         <div class="card">
             <div class="card-header">
@@ -562,6 +614,55 @@ export async function mount(root) {
             const res = await api.system.users.remove(id);
             if (res && res.ok) { toast('用户已删除', 'success'); await Promise.all([loadUsers(), loadPerms()]); }
             else toast((res && res.message) || '删除失败', 'danger');
+        }
+    });
+
+    /* ---------------- 备份与迁移 ---------------- */
+
+    root.querySelector('#btn-bk-export').addEventListener('click', async () => {
+        if (!guardAdmin('导出配置备份')) return;
+        const pass = root.querySelector('#bk-export-pass').value;
+        const pass2 = root.querySelector('#bk-export-pass2').value;
+        const msg = root.querySelector('#bk-export-msg');
+        if (pass.length < 8) { toast('备份口令至少 8 位', 'warn'); return; }
+        if (pass !== pass2) { toast('两次输入的口令不一致', 'warn'); return; }
+        msg.textContent = '加密导出中...';
+        const res = await api.system.backup.export({
+            passphrase: pass,
+            includeUsers: root.querySelector('#bk-include-users').checked,
+            includeHistory: root.querySelector('#bk-include-history').checked
+        });
+        if (res && res.ok) {
+            msg.textContent = `已导出：${res.filePath}`;
+            toast('备份文件已加密导出', 'success');
+        } else if (res && !res.canceled) {
+            msg.textContent = '';
+            toast((res && res.message) || '导出失败', 'danger');
+        } else {
+            msg.textContent = '';
+        }
+    });
+
+    root.querySelector('#btn-bk-import').addEventListener('click', async () => {
+        if (!guardAdmin('导入配置备份')) return;
+        const pass = root.querySelector('#bk-import-pass').value;
+        const mode = root.querySelector('#bk-import-mode').value;
+        const msg = root.querySelector('#bk-import-msg');
+        if (!pass) { toast('请输入备份口令', 'warn'); return; }
+        if (mode === 'replace' && !confirm('「替换」模式将整体覆盖同名配置集合，确认继续？')) return;
+        msg.textContent = '解密校验中...';
+        const res = await api.system.backup.import({ passphrase: pass, mode });
+        if (res && res.ok) {
+            const total = Object.values(res.counts || {}).reduce((a, b) => a + b, 0);
+            msg.textContent = `已导入 ${total} 条（备份生成于 ${res.createdAt || '-'}）`;
+            toast('备份导入完成，正在刷新列表', 'success');
+            root.querySelector('#bk-import-pass').value = '';
+            await Promise.all([loadUsers(), loadPerms()]);
+        } else if (res && !res.canceled) {
+            msg.textContent = '';
+            toast((res && res.message) || '导入失败', 'danger');
+        } else {
+            msg.textContent = '';
         }
     });
 

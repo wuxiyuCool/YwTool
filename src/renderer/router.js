@@ -23,9 +23,11 @@ import * as tasks from './pages/tasks.js';
 import * as scripts from './pages/scripts.js';
 import * as dbconfig from './pages/dbconfig.js';
 import * as sql from './pages/sql.js';
+import * as etl from './pages/etl.js';
 import * as sensitive from './pages/sensitive.js';
 import * as audit from './pages/audit.js';
 import * as accounts from './pages/accounts.js';
+import * as ledger from './pages/ledger.js';
 import * as system from './pages/system.js';
 import * as aiconfig from './pages/aiconfig.js';
 import * as aiPanel from './aiPanel.js';
@@ -44,6 +46,8 @@ const icons = {
     scroll: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="14 3 14 9 20 9"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/></svg>',
     key: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="15" r="4"/><path d="M10.8 12.2L20 3l1.5 1.5-1.5 1.5 1.5 1.5-2.5 2.5-1.5-1.5-2 2"/></svg>',
     spark: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/><path d="M19 15l.9 2.1L22 18l-2.1.9L19 21l-.9-2.1L16 18l2.1-.9z"/></svg>',
+    transfer: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 3 21 8 16 13"/><path d="M21 8H9"/><polyline points="8 11 3 16 8 21"/><path d="M3 16h12"/></svg>',
+    vault: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="12" cy="12" r="4"/><path d="M12 10v2l1.5 1.5"/></svg>',
     gear: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.08a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.08a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.08a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>'
 };
 
@@ -54,7 +58,7 @@ const icons = {
 const domainIcons = { server: icons.server, database: icons.database, system: icons.gear };
 const domains = [
     { id: 'server', label: '服务器运维', desc: '主机资产 · 批量命令 · 脚本托管' },
-    { id: 'database', label: '数据库运维', desc: '数据源配置 · SQL 工作台' },
+    { id: 'database', label: '数据库运维', desc: '数据源配置 · SQL 工作台 · 数据集成' },
     { id: 'system', label: '系统运维', desc: '用户权限 · 安全规则 · 审计告警 · 运行参数' }
 ].map(d => ({ ...d, icon: domainIcons[d.id] }));
 
@@ -69,7 +73,9 @@ const pages = {
     scripts: { label: '脚本管理', sub: 'Shell / Python 脚本托管与执行', domain: 'server', icon: icons.code, module: 'scripts', mod: scripts },
     dbconfig: { label: '数据库配置', sub: '数据源增删改查 · 连接测试 · 驱动状态', domain: 'database', icon: icons.plug, module: 'dbconfig', mod: dbconfig },
     sql: { label: 'SQL 工作台', sub: '库表结构浏览 · SQL 脚本执行 · 执行历史', domain: 'database', icon: icons.database, module: 'sqltools', mod: sql },
+    etl: { label: '数据集成', sub: '库对库 · 文件对库 · 库对文件 同步向导', domain: 'database', icon: icons.transfer, module: 'etl', mod: etl },
     accounts: { label: '多系统账号', sub: '第三方系统凭据加密存储 · 模拟登录', domain: 'system', icon: icons.key, module: 'accounts', mod: accounts },
+    ledger: { label: '凭据台账', sub: '全量账号口令台账 · 解密查看（仅系统管理员）', domain: 'system', icon: icons.vault, module: 'ledger', mod: ledger },
     sensitive: { label: '敏感词配置', sub: '命令拦截规则 · 正则黑名单 · 白名单机制', domain: 'system', icon: icons.shield, module: 'rules', mod: sensitive },
     audit: { label: '日志审计', sub: '操作与命令全量留痕 · 异常告警', domain: 'system', icon: icons.scroll, module: 'audit', mod: audit },
     aiconfig: { label: 'AI 配置', sub: '模型提供方 · 模型清单 · Agent 能力开关', domain: 'system', icon: icons.spark, module: 'ai', mod: aiconfig },
@@ -89,8 +95,20 @@ let currentDomain = null;
  * 权限判定
  * ------------------------------------------------------------------ */
 
-/** 当前用户对所有模块的权限等级（系统管理员由主进程注入全 admin） */
-const modulePerms = () => ((getUser() || {}).modules || {});
+/** 当前用户对所有模块的权限等级（系统管理员由主进程注入全 admin）
+ *  演示模式（浏览器直开，无登录返回的 modules）：全模块放行，便于纯 UI 调试 */
+let demoPerms = null;
+const modulePerms = () => {
+    const m = (getUser() || {}).modules || {};
+    if (api.demoMode && !Object.keys(m).length) {
+        if (!demoPerms) {
+            demoPerms = {};
+            Object.values(pages).forEach(p => { demoPerms[p.module] = 'admin'; });
+        }
+        return demoPerms;
+    }
+    return m;
+};
 
 /** 某页面是否对当前用户开放 */
 const canAccess = id => {

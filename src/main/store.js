@@ -231,8 +231,16 @@ function migrate() {
             db.modulePermissions[role] = permissionsMod.roleDefaults(role);
             changed = true;
         } else {
-            const normalized = permissionsMod.sanitizeMatrixForRole(db.modulePermissions[role], role);
-            if (JSON.stringify(normalized) !== JSON.stringify(db.modulePermissions[role])) {
+            // 新增模块：老矩阵里没有该键时按角色内置默认值回填（显式 null 视为「已决策」不动）
+            const matrix = db.modulePermissions[role];
+            permissionsMod.MODULES.forEach(m => {
+                if (!(m.id in matrix)) {
+                    matrix[m.id] = permissionsMod.roleDefaults(role)[m.id] || null;
+                    changed = true;
+                }
+            });
+            const normalized = permissionsMod.sanitizeMatrixForRole(matrix, role);
+            if (JSON.stringify(normalized) !== JSON.stringify(matrix)) {
                 db.modulePermissions[role] = normalized;
                 changed = true;
             }

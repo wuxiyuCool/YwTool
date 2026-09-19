@@ -37,6 +37,9 @@ const validChannels = [
     'accounts:list', 'accounts:save', 'accounts:delete', 'accounts:reveal',
     'accounts:reset', 'accounts:loginTest', 'accounts:policy:save',
 
+    // 凭据台账（聚合查看与解密，仅系统管理员）
+    'ledger:list', 'ledger:reveal',
+
     // 日志审计
     'audit:query', 'audit:stats', 'audit:append', 'audit:cleanup', 'audit:paths',
 
@@ -55,6 +58,7 @@ const validChannels = [
 
     // 系统管理
     'system:env', 'system:config:get', 'system:config:save',
+    'system:backup:export', 'system:backup:import',
     'system:users:list', 'system:users:save', 'system:users:delete',
     'system:modules:list', 'system:perms:get', 'system:perms:save', 'system:perms:reset',
 

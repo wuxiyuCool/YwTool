@@ -144,6 +144,8 @@ function demoFallback(channel, data) {
         case 'db:etl:runs': return demo.demoEtlRuns;
         case 'dbconfig:list': return demo.demoDbSources;
         case 'dbconfig:drivers': return demo.demoDriverMeta;
+        case 'ledger:list': return demoLedgerRows();
+        case 'ledger:reveal': return { ok: false, message: '演示模式不支持查看明文凭据' };
         case 'dashboard:overview': return {
             stats: {
                 hostTotal: demo.demoHosts.length,
@@ -169,6 +171,25 @@ function demoFallback(channel, data) {
         default:
             return { ok: false, message: NOT_SUPPORTED };
     }
+}
+
+/** 演示模式：凭据台账聚合行（与主进程 ledgerHandler 出参同构） */
+function demoLedgerRows() {
+    const MASK = '●●●●●●●●';
+    return [
+        ...(demo.demoAccounts || []).map(a => ({
+            kind: 'account', id: a.id, name: a.name, target: a.url || '-', user: a.user || '-',
+            hasPassword: !!a.password, passwordMasked: a.password ? MASK : '', note: a.scriptName || '', updatedAt: a.lastSyncAt || ''
+        })),
+        ...(demo.demoDbSources || []).map(s => ({
+            kind: 'db', id: s.id, name: s.name, target: [s.host, s.port, s.database].filter(Boolean).join(':'), user: s.user || '-',
+            hasPassword: !!s.password, passwordMasked: s.password ? MASK : '', note: s.type || '', updatedAt: s.lastTestAt || ''
+        })),
+        ...(demo.demoHosts || []).filter(h => h.authType === 'password').map(h => ({
+            kind: 'host', id: h.id, name: h.name, target: `${h.ip}:${h.port || 22}`, user: h.user || '-',
+            hasPassword: !!h.password, passwordMasked: h.password ? MASK : '', note: (h.tags || []).join('、'), updatedAt: h.lastConnectedAt || ''
+        }))
+    ];
 }
 
 function queryDemoLogs(query = {}) {
@@ -314,7 +335,18 @@ export const api = {
             get: () => invoke('system:perms:get'),
             save: payload => invoke('system:perms:save', payload),
             reset: payload => invoke('system:perms:reset', payload)
+        },
+        /** 配置备份：口令加密的导出 / 导入（merge 合并 · replace 替换） */
+        backup: {
+            export: payload => invoke('system:backup:export', payload),
+            import: payload => invoke('system:backup:import', payload)
         }
+    },
+
+    /** 凭据台账：聚合业务系统 / 数据源 / 主机的账号口令（仅系统管理员） */
+    ledger: {
+        list: () => invoke('ledger:list'),
+        reveal: payload => invoke('ledger:reveal', payload)
     },
 
     /** 数据库配置（数据库运维域 · 独立模块） */

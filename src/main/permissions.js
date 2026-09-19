@@ -16,7 +16,7 @@
 /** 三大运维域 */
 const DOMAINS = [
     { id: 'server', label: '服务器运维', desc: '主机资产 · 批量命令 · 脚本托管' },
-    { id: 'database', label: '数据库运维', desc: '数据源配置 · SQL 工作台' },
+    { id: 'database', label: '数据库运维', desc: '数据源配置 · SQL 工作台 · 数据集成' },
     { id: 'system', label: '系统运维', desc: '用户权限 · 安全规则 · 审计告警 · 运行参数' }
 ];
 
@@ -36,8 +36,10 @@ const MODULES = [
 
     { id: 'dbconfig', domain: 'database', label: '数据库配置', desc: '数据源增删改查与连接测试', pages: ['dbconfig'], caps: ['viewer', 'operator', 'admin'] },
     { id: 'sqltools', domain: 'database', label: 'SQL 工作台', desc: '库表结构浏览与 SQL 执行', pages: ['sql'], caps: ['viewer', 'operator', 'admin'] },
+    { id: 'etl', domain: 'database', label: '数据集成', desc: '库对库 / 文件对库 / 库对文件 同步', pages: ['etl'], caps: ['viewer', 'operator', 'admin'] },
 
     { id: 'accounts', domain: 'system', label: '多系统账号', desc: '第三方系统凭据与模拟登录', pages: ['accounts'], caps: ['viewer', 'operator', 'admin'] },
+    { id: 'ledger', domain: 'system', label: '凭据台账', desc: '账号口令聚合台账 · 解密查看（仅系统管理员，不参与矩阵授权）', pages: ['ledger'], caps: [] },
     { id: 'rules', domain: 'system', label: '敏感词配置', desc: '命令拦截规则与白名单', pages: ['sensitive'], caps: ['viewer', 'admin'] },
     { id: 'audit', domain: 'system', label: '日志审计', desc: '操作留痕与异常告警', pages: ['audit'], caps: ['viewer', 'admin'] },
     { id: 'alerts', domain: 'system', label: '告警中心', desc: '顶栏告警铃铛与确认', pages: [], caps: ['viewer', 'operator', 'admin'] },
@@ -64,18 +66,21 @@ const CHANNEL_RULES = [
     // 数据库运维
     ['dbconfig:*', 'dbconfig'],
     ['sql:*', 'sqltools'],
+    ['db:etl:*', 'etl'],       // 必须先于 db:*，否则 ETL 通道会被划入 sqltools
     ['db:*', 'sqltools'],
     ['sqlScripts:*', 'sqltools'],
     ['sqlHistory:*', 'sqltools'],
 
     // 系统运维
     ['accounts:*', 'accounts'],
+    ['ledger:*', 'ledger'],
     ['rules:*', 'rules'],
     ['audit:*', 'audit'],
     ['alerts:*', 'alerts'],
     ['system:users:*', 'users'],
     ['system:perms:*', 'users'],
     ['system:modules:*', 'users'],
+    ['system:backup:*', 'settings'],
     ['system:env', 'settings'],
     ['system:config:*', 'settings'],
 
@@ -94,7 +99,9 @@ const ROLE_MODULE_DEFAULTS = {
         schedules: 'operator',
         dbconfig: 'viewer',
         sqltools: 'operator',
+        etl: 'viewer',
         accounts: 'operator',
+        ledger: null,
         rules: 'viewer',
         audit: 'viewer',
         alerts: 'operator',
@@ -110,7 +117,9 @@ const ROLE_MODULE_DEFAULTS = {
         schedules: 'viewer',
         dbconfig: 'viewer',
         sqltools: 'viewer',
+        etl: null,
         accounts: 'viewer',
+        ledger: null,
         rules: 'viewer',
         audit: 'viewer',
         alerts: 'viewer',

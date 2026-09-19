@@ -812,9 +812,32 @@ table.table {
 .ai-model-chip:hover { border-color: var(--primary); color: var(--primary); }
 .ai-model-chip.active { background: var(--primary); border-color: var(--primary); color: #fff; }
 
+/* ---------------- 凭据台账 ---------------- */
+
+.ledger-plain {
+    color: var(--danger);
+    background: var(--danger-soft);
+    padding: 2px 8px;
+    border-radius: 6px;
+    user-select: all;
+    word-break: break-all;
+}
+
 /* ---------------- 数据集成（ETL）向导 ---------------- */
 
-.etl-modal { width: 1000px; max-width: 96vw; }
+.etl-page .etl-head-actions { margin-top: 6px; }
+.etl-page .etl-head-actions .select { min-width: 200px; }
+.etl-page .etl-steps { border-radius: 10px; margin-top: 4px; }
+.etl-page .etl-page-body { max-height: none; padding: 18px 20px 6px; }
+
+.etl-page-foot {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 14px 20px 0;
+    border-top: 1px solid var(--border);
+    margin-top: 14px;
+}
 
 .etl-head-actions { display: flex; align-items: center; gap: 8px; }
 .etl-head-actions .select { min-width: 180px; height: 30px; padding: 4px 8px; font-size: 12.5px; }

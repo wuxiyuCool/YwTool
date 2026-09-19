@@ -27,6 +27,10 @@ const ADMIN_ONLY = new Set([
     'system:config:save',
     'system:users:save', 'system:users:delete',
     'system:perms:save', 'system:perms:reset',
+    // 配置备份包含凭据明文（信封内），导入会整库覆写：仅系统管理员
+    'system:backup:export', 'system:backup:import',
+    // 凭据台账：列表与解密查看均仅系统管理员
+    'ledger:list', 'ledger:reveal',
     'accounts:reveal', 'accounts:policy:save', 'accounts:save', 'accounts:delete',
     'rules:save', 'rules:delete', 'rules:toggle',
     'audit:cleanup',
