@@ -9,6 +9,7 @@
  * Base64/Hex/URL/Unicode 等纯文本转换在渲染进程本地完成，不占用 IPC。
  */
 const crypto = require('crypto');
+const zlib = require('zlib');
 
 /* ---------------- 哈希 ---------------- */
 
@@ -28,7 +29,7 @@ function hash(payload = {}) {
 
 /* ---------------- 对称加解密 ---------------- */
 
-/** 算法清单：keyLen 单位字节（0 表示流密码不强制），block 表示需要 IV */
+/** 算法清单：keyLen 单位字节（0 表示流密码不强制），iv 表示需要 IV 的字节数 */
 const CIPHERS = {
     'AES-128-CBC': { node: 'aes-128-cbc', keyLen: 16, iv: 16 },
     'AES-192-CBC': { node: 'aes-192-cbc', keyLen: 24, iv: 16 },
@@ -38,7 +39,12 @@ const CIPHERS = {
     'AES-256-ECB': { node: 'aes-256-ecb', keyLen: 32, iv: 0 },
     'AES-128-CTR': { node: 'aes-128-ctr', keyLen: 16, iv: 16 },
     'AES-256-CTR': { node: 'aes-256-ctr', keyLen: 32, iv: 16 },
+    'AES-128-CFB': { node: 'aes-128-cfb', keyLen: 16, iv: 16 },
+    'AES-256-CFB': { node: 'aes-256-cfb', keyLen: 32, iv: 16 },
+    'AES-128-OFB': { node: 'aes-128-ofb', keyLen: 16, iv: 16 },
+    'AES-256-OFB': { node: 'aes-256-ofb', keyLen: 32, iv: 16 },
     'AES-256-GCM': { node: 'aes-256-gcm', keyLen: 32, iv: 12, aead: true },
+    'DES-CBC': { node: 'des-cbc', keyLen: 8, iv: 8 },
     '3DES-CBC': { node: 'des-ede3-cbc', keyLen: 24, iv: 8 },
     RC4: { node: 'rc4', keyLen: 0, iv: 0, stream: true }
 };
@@ -135,6 +141,113 @@ function jwt(payload = {}) {
     return out;
 }
 
+/* ---------------- HMAC / PBKDF2 ---------------- */
+
+function hmac(payload = {}) {
+    const algo = String(payload.algo || 'sha256').toLowerCase();
+    if (!['md5', 'sha1', 'sha256', 'sha512'].includes(algo)) return { ok: false, message: '不支持的摘要算法' };
+    try {
+        const dataEnc = payload.dataEncoding === 'hex' ? 'hex' : payload.dataEncoding === 'base64' ? 'base64' : 'utf8';
+        const h = crypto.createHmac(algo, Buffer.from(String(payload.key ?? ''), dataEnc))
+            .update(Buffer.from(String(payload.text ?? ''), dataEnc));
+        return { ok: true, result: h.digest(payload.outEncoding === 'base64' ? 'base64' : 'hex') };
+    } catch (err) {
+        return { ok: false, message: err.message };
+    }
+}
+
+function pbkdf2(payload = {}) {
+    try {
+        const iterations = Math.min(Math.max(Number(payload.iterations) || 100000, 1), 2000000);
+        const keyLen = Math.min(Math.max(Number(payload.keyLen) || 32, 4), 512);
+        const digest = ['sha1', 'sha256', 'sha512'].includes(payload.digest) ? payload.digest : 'sha256';
+        const out = crypto.pbkdf2Sync(
+            Buffer.from(String(payload.password ?? ''), 'utf8'),
+            Buffer.from(String(payload.salt ?? ''), 'utf8'),
+            iterations, keyLen, digest
+        );
+        return { ok: true, result: out.toString(payload.outEncoding === 'base64' ? 'base64' : 'hex'), iterations, keyLen, digest };
+    } catch (err) {
+        return { ok: false, message: err.message };
+    }
+}
+
+/* ---------------- 压缩编码（gzip / deflate / brotli ↔ Base64/Hex） ---------------- */
+
+function codec(payload = {}) {
+    try {
+        const data = Buffer.from(String(payload.data ?? ''), payload.dataEncoding === 'hex' ? 'hex' : payload.dataEncoding === 'base64' ? 'base64' : 'utf8');
+        const outEnc = payload.outEncoding === 'hex' ? 'hex' : 'base64';
+        const map = {
+            gzip: d => zlib.gzipSync(d),
+            gunzip: d => zlib.gunzipSync(d),
+            deflate: d => zlib.deflateSync(d),
+            inflate: d => zlib.inflateSync(d),
+            brotli: d => zlib.brotliCompressSync(d),
+            unbrotli: d => zlib.brotliDecompressSync(d)
+        };
+        const fn = map[String(payload.mode || '')];
+        if (!fn) return { ok: false, message: '不支持的压缩模式' };
+        const out = fn(data);
+        const isText = ['gunzip', 'inflate', 'unbrotli'].includes(payload.mode);
+        return { ok: true, result: out.toString(isText ? 'utf8' : outEnc), bytes: out.length };
+    } catch (err) {
+        return { ok: false, message: err.message + '（解压模式请选择 Base64/Hex 输入）' };
+    }
+}
+
+/* ---------------- RSA（密钥对 / OAEP 加解密 / SHA-256 签名验签） ---------------- */
+
+function readKey(pem, type) {
+    const opts = { key: String(pem || ''), format: 'pem' };
+    return type === 'private' ? crypto.createPrivateKey(opts) : crypto.createPublicKey(opts);
+}
+
+function rsa(payload = {}) {
+    try {
+        switch (payload.action) {
+            case 'generate': {
+                const { publicKey, privateKey } = crypto.generateKeyPairSync('rsa', {
+                    modulusLength: Math.min(Math.max(Number(payload.modulusLength) || 2048, 2048), 4096)
+                });
+                return {
+                    ok: true,
+                    publicKey: publicKey.export({ type: 'pkcs1', format: 'pem' }).toString(),
+                    privateKey: privateKey.export({ type: 'pkcs1', format: 'pem' }).toString()
+                };
+            }
+            case 'encrypt': {
+                const enc = crypto.publicEncrypt(
+                    { key: readKey(payload.publicKey, 'public'), padding: crypto.constants.RSA_PKCS1_OAEP_PADDING, oaepHash: 'sha256' },
+                    Buffer.from(String(payload.text ?? ''), 'utf8')
+                );
+                return { ok: true, result: enc.toString('base64') };
+            }
+            case 'decrypt': {
+                const dec = crypto.privateDecrypt(
+                    { key: readKey(payload.privateKey, 'private'), padding: crypto.constants.RSA_PKCS1_OAEP_PADDING, oaepHash: 'sha256' },
+                    Buffer.from(String(payload.text || '').trim(), 'base64')
+                );
+                return { ok: true, result: dec.toString('utf8') };
+            }
+            case 'sign': {
+                const sig = crypto.createSign('RSA-SHA256').update(String(payload.text ?? ''), 'utf8')
+                    .sign(readKey(payload.privateKey, 'private'));
+                return { ok: true, result: sig.toString('base64') };
+            }
+            case 'verify': {
+                const valid = crypto.createVerify('RSA-SHA256').update(String(payload.text ?? ''), 'utf8')
+                    .verify(readKey(payload.publicKey, 'public'), Buffer.from(String(payload.signature || '').trim(), 'base64'));
+                return { ok: true, valid };
+            }
+            default:
+                return { ok: false, message: '不支持的 RSA 动作' };
+        }
+    } catch (err) {
+        return { ok: false, message: err.message };
+    }
+}
+
 /* ---------------- 二维码（懒加载可选依赖） ---------------- */
 
 let qrLib; let jimpLib; let jsqrLib;
@@ -208,4 +321,4 @@ const driverStatus = async () => {
     };
 };
 
-module.exports = { hash, cipher, cipherList, jwt, qrGenerate, qrDecode, driverStatus };
+module.exports = { hash, cipher, cipherList, hmac, pbkdf2, codec, rsa, jwt, qrGenerate, qrDecode, driverStatus };

@@ -16,8 +16,8 @@ function loadSsh2() {
 
 const MISSING_DEP = '未安装 ssh2 依赖，请先执行：npm install ssh2';
 
-/** 单主机执行命令（一次连接，执行完即断开） */
-function execOnHost(host, cmd, timeoutSec = 30) {
+/** 单主机执行命令（一次连接，执行完即断开）；maxOutput 可按调用方需要放宽（如 kubectl -o json） */
+function execOnHost(host, cmd, timeoutSec = 30, maxOutput = 20000) {
     return new Promise(resolve => {
         const started = Date.now();
         const base = {
@@ -53,7 +53,7 @@ function execOnHost(host, cmd, timeoutSec = 30) {
                     finish({
                         status: code === 0 ? 'success' : 'failed',
                         exitCode: code,
-                        output: stdout.slice(0, 20000),
+                        output: stdout.slice(0, maxOutput),
                         error: stderr.slice(0, 4000)
                     });
                 });

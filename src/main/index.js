@@ -12,6 +12,7 @@ const IPC_MODULES = [
     './handlers/authHandler',
     './handlers/hostHandler',
     './handlers/dockerHandler',
+    './handlers/kubeHandler',
     './handlers/ruleHandler',
     './handlers/taskHandler',
     './handlers/scriptHandler',

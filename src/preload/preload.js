@@ -25,8 +25,12 @@ const validChannels = [
 
     // 容器编排与运维（Docker）
     'docker:host:list', 'docker:host:save', 'docker:host:delete', 'docker:host:test',
-    'docker:containers', 'docker:images', 'docker:logs', 'docker:run',
+    'docker:containers', 'docker:images', 'docker:logs', 'docker:run', 'docker:info', 'docker:image:detail',
     'docker:stack:run', 'docker:exec', 'docker:compose:run',
+
+    // K8s 集群概览（同属容器运维模块）
+    'kube:clusters:list', 'kube:cluster:save', 'kube:cluster:delete', 'kube:cluster:test',
+    'kube:overview', 'kube:get', 'kube:logs', 'kube:run', 'kube:resources',
 
     // 任务执行
     'tasks:list', 'tasks:detail', 'tasks:validate', 'tasks:run', 'tasks:export',
@@ -47,9 +51,9 @@ const validChannels = [
     'netsec:cases:list', 'netsec:case:save', 'netsec:case:delete',
     'netsec:history:list', 'netsec:history:clear',
 
-    // 安全运维 · 信息安全（哈希 / 对称加解密 / JWT / 二维码）
-    'sec:hash', 'sec:cipher', 'sec:ciphers', 'sec:jwt',
-    'sec:qr:generate', 'sec:qr:decode', 'sec:drivers',
+    // 安全运维 · 信息安全（哈希 / 对称加解密 / HMAC·PBKDF2 / 压缩 / RSA / JWT / 二维码）
+    'sec:hash', 'sec:cipher', 'sec:ciphers', 'sec:hmac', 'sec:pbkdf2', 'sec:codec', 'sec:rsa',
+    'sec:jwt', 'sec:qr:generate', 'sec:qr:decode', 'sec:drivers',
 
     // 凭据台账（聚合查看与解密，仅系统管理员）
     'ledger:list', 'ledger:reveal', 'ledger:unlock', 'ledger:lock', 'ledger:status',

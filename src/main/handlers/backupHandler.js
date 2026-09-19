@@ -23,7 +23,7 @@ const VERSION = 1;
 const SCRYPT_PARAMS = { N: 16384, r: 8, p: 1 };
 
 /** 数组型配置集合（按 id 合并 / 整体替换） */
-const ARRAY_COLLECTIONS = ['hosts', 'scripts', 'rules', 'accounts', 'dbSources', 'schedules', 'sqlScripts', 'etlTasks', 'dockerHosts'];
+const ARRAY_COLLECTIONS = ['hosts', 'scripts', 'rules', 'accounts', 'dbSources', 'schedules', 'sqlScripts', 'etlTasks', 'dockerHosts', 'kubeClusters'];
 /** 对象型配置集合 */
 const OBJECT_COLLECTIONS = ['aiConfig', 'aiAgent', 'modulePermissions'];
 /** 执行历史（默认不导出，勾选后一并备份） */

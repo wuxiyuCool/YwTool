@@ -76,11 +76,18 @@ function demoFallback(channel, data) {
         case 'db:describe': return demo.demoDbDescribe(data);
         case 'sql:execute': return demoQuery(data);
         case 'hosts:list': return demo.demoHosts;
-        case 'docker:host:list': return [
-            { id: 'dh_local', name: '本机 Docker（演示）', kind: 'pipe', tags: ['本地'], status: 'unknown', hasToken: false, tokenMasked: '' }
-        ];
+        case 'docker:host:list': return {
+            ok: true,
+            endpoints: [{ id: 'dh_local', name: '本机 Docker（演示）', kind: 'pipe', tags: ['本地'], status: 'unknown', hasToken: false, tokenMasked: '' }],
+            hosts: (demo.demoHosts || []).slice(0, 3).map(h => ({ id: h.id, name: h.name, ip: h.ip, authType: h.authType, hasPassword: !!h.password }))
+        };
         case 'docker:containers': return { ok: true, containers: [], stacks: [] };
         case 'docker:images': return { ok: true, images: [] };
+        case 'docker:info': return { ok: false, message: '演示模式无法连接 Docker 引擎' };
+        case 'kube:clusters:list': return { clusters: [{ id: 'kc_local', name: '本机 kubectl（演示）', mode: 'local', namespace: 'default' }], hosts: [] };
+        case 'kube:resources': return { ok: true, resources: ['pods', 'deployments', 'statefulsets', 'daemonsets', 'jobs', 'cronjobs', 'services', 'ingresses', 'nodes', 'namespaces', 'configmaps', 'events'] };
+        case 'kube:overview': return { ok: false, message: '演示模式无法访问真实集群，请在应用内（npm start）查看' };
+        case 'kube:get': return { ok: true, resource: data && data.resource, rows: [] };
         case 'scripts:list': return demo.demoScripts;
         case 'rules:list': return demo.demoRules;
         case 'accounts:list': return demo.demoAccounts;
@@ -354,11 +361,26 @@ export const api = {
         },
         containers: (hostId, all = true) => invoke('docker:containers', { hostId, all }),
         images: hostId => invoke('docker:images', { hostId }),
+        info: hostId => invoke('docker:info', { hostId }),
+        imageDetail: (hostId, ref) => invoke('docker:image:detail', { hostId, ref }),
         logs: (hostId, id, tail) => invoke('docker:logs', { hostId, id, tail }),
         run: (hostId, action, id, force) => invoke('docker:run', { hostId, action, id, force }),
         stackRun: (hostId, project, action) => invoke('docker:stack:run', { hostId, project, action }),
         exec: (hostId, id, cmd) => invoke('docker:exec', { hostId, id, cmd }),
         compose: (yaml, action) => invoke('docker:compose:run', { yaml, action })
+    },
+
+    /** K8s 集群概览：local（本机 kubectl）/ ssh（跳板机 kubectl）双模式 */
+    kube: {
+        clusters: () => invoke('kube:clusters:list'),
+        save: payload => invoke('kube:cluster:save', payload),
+        remove: id => invoke('kube:cluster:delete', id),
+        test: id => invoke('kube:cluster:test', id),
+        overview: clusterId => invoke('kube:overview', { clusterId }),
+        get: (clusterId, resource, opts = {}) => invoke('kube:get', { clusterId, resource, ...opts }),
+        logs: (clusterId, pod, namespace, tail) => invoke('kube:logs', { clusterId, pod, namespace, tail }),
+        run: (clusterId, command) => invoke('kube:run', { clusterId, command }),
+        resources: () => invoke('kube:resources')
     },
 
     tasks: {
@@ -516,11 +538,15 @@ export const api = {
         }
     },
 
-    /** 安全运维 · 信息安全：哈希 / 对称加解密 / JWT / 二维码（本机计算） */
+    /** 安全运维 · 信息安全：哈希 / 对称加解密 / HMAC·PBKDF2 / 压缩 / RSA / JWT / 二维码（本机计算） */
     sec: {
         hash: payload => invoke('sec:hash', payload),
         cipher: payload => invoke('sec:cipher', payload),
         ciphers: () => invoke('sec:ciphers'),
+        hmac: payload => invoke('sec:hmac', payload),
+        pbkdf2: payload => invoke('sec:pbkdf2', payload),
+        codec: payload => invoke('sec:codec', payload),
+        rsa: payload => invoke('sec:rsa', payload),
         jwt: payload => invoke('sec:jwt', payload),
         qr: {
             generate: payload => invoke('sec:qr:generate', payload),

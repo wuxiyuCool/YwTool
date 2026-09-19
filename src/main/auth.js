@@ -33,6 +33,8 @@ const ADMIN_ONLY = new Set([
     'ledger:list', 'ledger:reveal', 'ledger:unlock', 'ledger:lock', 'ledger:status',
     // 容器运维：端点凭据管理与容器内命令、本机 compose 属高危
     'docker:host:save', 'docker:host:delete', 'docker:exec', 'docker:compose:run',
+    // K8s：集群配置与任意 kubectl 执行仅管理员（只读概览随 containers 模块授权）
+    'kube:cluster:save', 'kube:cluster:delete', 'kube:run',
     'accounts:reveal', 'accounts:policy:save', 'accounts:save', 'accounts:delete',
     'rules:save', 'rules:delete', 'rules:toggle',
     'audit:cleanup',

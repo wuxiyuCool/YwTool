@@ -31,7 +31,7 @@ const DOMAINS = [
 const MODULES = [
     { id: 'dashboard', domain: 'server', label: '总览', desc: '平台运行概览与近期动态', pages: ['dashboard'], caps: ['viewer'] },
     { id: 'hosts', domain: 'server', label: '主机管理', desc: '内网主机资产与 SSH 连接', pages: ['hosts'], caps: ['viewer', 'operator', 'admin'] },
-    { id: 'containers', domain: 'server', label: '容器运维', desc: 'Docker 容器与 compose 编排运维', pages: ['containers'], caps: ['viewer', 'operator', 'admin'] },
+    { id: 'containers', domain: 'server', label: '容器运维', desc: 'Docker 与 K8s 容器编排运维', pages: ['containers'], caps: ['viewer', 'operator', 'admin'] },
     { id: 'tasks', domain: 'server', label: '任务执行', desc: '批量命令执行与历史', pages: ['tasks'], caps: ['viewer', 'operator', 'admin'] },
     { id: 'scripts', domain: 'server', label: '脚本管理', desc: 'Shell / Python 脚本托管', pages: ['scripts'], caps: ['viewer', 'operator', 'admin'] },
     { id: 'schedules', domain: 'server', label: '定时任务', desc: '周期任务编排（并入任务页）', pages: [], caps: ['viewer', 'operator', 'admin'] },
@@ -65,6 +65,7 @@ const CHANNEL_RULES = [
     // 服务器运维
     ['hosts:*', 'hosts'],
     ['docker:*', 'containers'],
+    ['kube:*', 'containers'],
     ['tasks:*', 'tasks'],
     ['scripts:*', 'scripts'],
     ['schedules:*', 'schedules'],

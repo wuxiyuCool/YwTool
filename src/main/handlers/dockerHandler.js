@@ -1,8 +1,9 @@
 /**
  * 容器编排与运维 IPC（服务器运维域 · containers 模块）
- * 通道：docker:host:list|save|delete|test     Docker 端点管理（token 加密存储）
+ * 通道：docker:host:list|save|delete|test     Docker 端点管理（token 加密存储；支持本机/TCP/SSH 桥接）
  *      docker:containers                      容器列表 + compose 项目分组（一次往返）
- *      docker:images                          镜像列表
+ *      docker:images / docker:image:detail    镜像列表 / 镜像详情（inspect + 分层历史）
+ *      docker:info                            引擎详情（连接状态卡）
  *      docker:logs                            容器日志（demux 后文本）
  *      docker:run                             容器操作：start/stop/restart/kill/pause/unpause/remove/image-delete
  *      docker:stack:run                       compose 项目级 启/停/重启
@@ -32,20 +33,33 @@ function pickHost(id) {
 function setup(ipcMain) {
     /* ---------------- 端点管理 ---------------- */
 
-    ipcMain.handle('docker:host:list', () => store.list('dockerHosts').map(sanitize));
+    /** 端点清单 + 可关联主机（SSH 端点表单下拉用） */
+    ipcMain.handle('docker:host:list', () => ({
+        ok: true,
+        endpoints: store.list('dockerHosts').map(sanitize),
+        hosts: store.list('hosts').map(h => ({ id: h.id, name: h.name, ip: h.ip, authType: h.authType, hasPassword: !!h.password }))
+    }));
 
     ipcMain.handle('docker:host:save', (e, payload = {}) => {
         const data = { ...payload };
+        const kind = data.kind === 'ssh' ? 'ssh' : data.kind === 'tcp' ? 'tcp' : 'pipe';
+        data.kind = kind;
         if (!data.token || data.token === mask()) {
             delete data.token;                       // 留空 = 不修改原 token
         } else {
             data.token = encrypt(data.token);
         }
-        if (data.kind !== 'tcp') { data.host = data.host || ''; data.port = ''; }
+        if (kind === 'tcp') { /* host/port 保留 */ } else if (kind === 'ssh') {
+            if (!data.hostId) return { ok: false, message: 'SSH 端点需要关联一台平台主机（其凭据由主机管理统一维护）' };
+            data.host = ''; data.port = '';
+        } else {
+            data.host = data.host || ''; data.port = ''; data.hostId = '';
+        }
         const saved = store.upsert('dockerHosts', data);
+        containers.dropBridge(saved.id);             // 端点变更后重建 SSH 桥接
         audit.write({
             type: '操作', user: operator(),
-            detail: `${payload.id ? '修改' : '新增'} Docker 端点「${saved.name}」（${saved.kind === 'tcp' ? saved.host + ':' + saved.port : '本机 socket'}）`
+            detail: `${payload.id ? '修改' : '新增'} Docker 端点「${saved.name}」（${kind === 'tcp' ? saved.host + ':' + saved.port : kind === 'ssh' ? 'SSH 桥接' : '本机 socket'}）`
         });
         return { ok: true, host: sanitize(saved) };
     });
@@ -53,6 +67,7 @@ function setup(ipcMain) {
     ipcMain.handle('docker:host:delete', (e, id) => {
         const host = store.find('dockerHosts', id);
         const ok = store.remove('dockerHosts', id);
+        containers.dropBridge(id);
         if (ok && host) audit.write({ type: '操作', user: operator(), detail: `删除 Docker 端点「${host.name}」` });
         return { ok };
     });
@@ -80,6 +95,24 @@ function setup(ipcMain) {
     ipcMain.handle('docker:images', async (e, { hostId } = {}) => {
         try {
             return { ok: true, images: await containers.listImages(pickHost(hostId)) };
+        } catch (err) {
+            return { ok: false, message: err.message };
+        }
+    });
+
+    /** 引擎详情（连接状态卡）：docker info + version 摘要 */
+    ipcMain.handle('docker:info', async (e, { hostId } = {}) => {
+        try {
+            return await containers.dockerInfo(pickHost(hostId));
+        } catch (err) {
+            return { ok: false, message: err.message };
+        }
+    });
+
+    /** 镜像详情：inspect + 分层历史 */
+    ipcMain.handle('docker:image:detail', async (e, { hostId, ref } = {}) => {
+        try {
+            return await containers.imageDetail(pickHost(hostId), ref);
         } catch (err) {
             return { ok: false, message: err.message };
         }

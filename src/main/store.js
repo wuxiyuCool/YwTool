@@ -132,9 +132,13 @@ function seeds() {
         // 安全运维 · 网络安全：请求案例（Postman 类收藏）+ 发送/抓包历史（滚动上限）
         apiCases: [],
         apiHistory: [],
-        // 容器运维：Docker 端点（token 密文；本机场景 kind=pipe）
+        // 容器运维：Docker 端点（token 密文；本机场景 kind=pipe，远程推荐 kind=ssh 关联主机）
         dockerHosts: [
-            { id: 'dh_local', name: '本机 Docker', kind: 'pipe', host: '', port: '', token: '', tags: ['本地'], note: '命名管道 / unix socket', status: 'unknown', lastTestAt: null }
+            { id: 'dh_local', name: '本机 Docker', kind: 'pipe', host: '', port: '', hostId: '', token: '', tags: ['本地'], note: '命名管道 / unix socket', status: 'unknown', lastTestAt: null }
+        ],
+        // K8s 集群：mode=local（平台机 kubectl）| ssh（跳板机 kubectl，复用主机资产）
+        kubeClusters: [
+            { id: 'kc_local', name: '本机 kubectl（默认 kubeconfig）', mode: 'local', hostId: '', namespace: 'default', note: '', status: 'unknown', lastTestAt: null }
         ],
         // 模块 → 角色 的界面/功能权限矩阵（未出现的角色使用内置默认值）
         modulePermissions: {
@@ -277,7 +281,7 @@ function migrate() {
     let changed = false;
 
     ['hosts', 'scripts', 'rules', 'accounts', 'tasks', 'users', 'dbSources', 'schedules', 'sqlScripts', 'sqlHistory', 'alerts',
-        'etlTasks', 'etlRuns', 'apiCases', 'apiHistory', 'dockerHosts'].forEach(key => {
+        'etlTasks', 'etlRuns', 'apiCases', 'apiHistory', 'dockerHosts', 'kubeClusters'].forEach(key => {
         if (!Array.isArray(db[key])) {
             db[key] = defaults[key] || [];
             changed = true;
@@ -380,7 +384,7 @@ function upsert(coll, item) {
     const prefix = {
         hosts: 'h_', scripts: 's_', rules: 'r_', accounts: 'a_', users: 'u_',
         dbSources: 'd_', tasks: 'T-', etlTasks: 'et_', etlRuns: 'er_', sqlScripts: 'sq_',
-        dockerHosts: 'dh_', aiRoles: 'ar_'
+        dockerHosts: 'dh_', aiRoles: 'ar_', kubeClusters: 'kc_'
     }[coll] || 'x_';
     if (item.id) {
         const idx = arr.findIndex(x => x.id === item.id);
