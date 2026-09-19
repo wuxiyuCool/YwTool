@@ -7,10 +7,11 @@
  * 两者的一致性由 .workbuddy/channel-check.js 静态校验，避免结构漂移。
  */
 
-/** 三大运维域（顺序即菜单与界面中的展示顺序） */
+/** 四大运维域（顺序即菜单与界面中的展示顺序） */
 const DOMAINS = [
     { id: 'server', label: '服务器运维' },
     { id: 'database', label: '数据库运维' },
+    { id: 'security', label: '安全运维' },
     { id: 'system', label: '系统运维' }
 ];
 
@@ -23,12 +24,16 @@ const DOMAINS = [
 const PAGES = [
     { id: 'dashboard', label: '总览', domain: 'server', module: 'dashboard' },
     { id: 'hosts', label: '主机管理', domain: 'server', module: 'hosts' },
+    { id: 'containers', label: '容器运维', domain: 'server', module: 'containers' },
     { id: 'tasks', label: '任务执行', domain: 'server', module: 'tasks' },
     { id: 'scripts', label: '脚本管理', domain: 'server', module: 'scripts' },
 
     { id: 'dbconfig', label: '数据库配置', domain: 'database', module: 'dbconfig' },
     { id: 'sql', label: 'SQL 工作台', domain: 'database', module: 'sqltools' },
     { id: 'etl', label: '数据集成', domain: 'database', module: 'etl' },
+
+    { id: 'netsec', label: '网络安全', domain: 'security', module: 'netsec' },
+    { id: 'infosec', label: '信息安全', domain: 'security', module: 'infosec' },
 
     { id: 'accounts', label: '多系统账号', domain: 'system', module: 'accounts' },
     { id: 'ledger', label: '凭据台账', domain: 'system', module: 'ledger' },

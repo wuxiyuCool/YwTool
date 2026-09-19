@@ -13,10 +13,11 @@
  *     这样能避免新增通道时忘记登记导致整块功能不可用
  */
 
-/** 三大运维域 */
+/** 四大运维域 */
 const DOMAINS = [
     { id: 'server', label: '服务器运维', desc: '主机资产 · 批量命令 · 脚本托管' },
     { id: 'database', label: '数据库运维', desc: '数据源配置 · SQL 工作台 · 数据集成' },
+    { id: 'security', label: '安全运维', desc: '网络安全抓包重放 · 信息安全加解密工具' },
     { id: 'system', label: '系统运维', desc: '用户权限 · 安全规则 · 审计告警 · 运行参数' }
 ];
 
@@ -30,6 +31,7 @@ const DOMAINS = [
 const MODULES = [
     { id: 'dashboard', domain: 'server', label: '总览', desc: '平台运行概览与近期动态', pages: ['dashboard'], caps: ['viewer'] },
     { id: 'hosts', domain: 'server', label: '主机管理', desc: '内网主机资产与 SSH 连接', pages: ['hosts'], caps: ['viewer', 'operator', 'admin'] },
+    { id: 'containers', domain: 'server', label: '容器运维', desc: 'Docker 容器与 compose 编排运维', pages: ['containers'], caps: ['viewer', 'operator', 'admin'] },
     { id: 'tasks', domain: 'server', label: '任务执行', desc: '批量命令执行与历史', pages: ['tasks'], caps: ['viewer', 'operator', 'admin'] },
     { id: 'scripts', domain: 'server', label: '脚本管理', desc: 'Shell / Python 脚本托管', pages: ['scripts'], caps: ['viewer', 'operator', 'admin'] },
     { id: 'schedules', domain: 'server', label: '定时任务', desc: '周期任务编排（并入任务页）', pages: [], caps: ['viewer', 'operator', 'admin'] },
@@ -37,6 +39,9 @@ const MODULES = [
     { id: 'dbconfig', domain: 'database', label: '数据库配置', desc: '数据源增删改查与连接测试', pages: ['dbconfig'], caps: ['viewer', 'operator', 'admin'] },
     { id: 'sqltools', domain: 'database', label: 'SQL 工作台', desc: '库表结构浏览与 SQL 执行', pages: ['sql'], caps: ['viewer', 'operator', 'admin'] },
     { id: 'etl', domain: 'database', label: '数据集成', desc: '库对库 / 文件对库 / 库对文件 同步', pages: ['etl'], caps: ['viewer', 'operator', 'admin'] },
+
+    { id: 'netsec', domain: 'security', label: '网络安全', desc: '请求重放 · 本地抓包代理 · 断点改包', pages: ['netsec'], caps: ['viewer', 'admin'] },
+    { id: 'infosec', domain: 'security', label: '信息安全', desc: '哈希 / 加解密 / JWT / 二维码工具箱', pages: ['infosec'], caps: ['viewer', 'operator', 'admin'] },
 
     { id: 'accounts', domain: 'system', label: '多系统账号', desc: '第三方系统凭据与模拟登录', pages: ['accounts'], caps: ['viewer', 'operator', 'admin'] },
     { id: 'ledger', domain: 'system', label: '凭据台账', desc: '账号口令聚合台账 · 解密查看（仅系统管理员，不参与矩阵授权）', pages: ['ledger'], caps: [] },
@@ -59,6 +64,7 @@ const CHANNEL_RULES = [
 
     // 服务器运维
     ['hosts:*', 'hosts'],
+    ['docker:*', 'containers'],
     ['tasks:*', 'tasks'],
     ['scripts:*', 'scripts'],
     ['schedules:*', 'schedules'],
@@ -70,6 +76,10 @@ const CHANNEL_RULES = [
     ['db:*', 'sqltools'],
     ['sqlScripts:*', 'sqltools'],
     ['sqlHistory:*', 'sqltools'],
+
+    // 安全运维
+    ['netsec:*', 'netsec'],
+    ['sec:*', 'infosec'],
 
     // 系统运维
     ['accounts:*', 'accounts'],
@@ -94,12 +104,15 @@ const ROLE_MODULE_DEFAULTS = {
     '运维员': {
         dashboard: 'viewer',
         hosts: 'operator',
+        containers: 'operator',
         tasks: 'operator',
         scripts: 'operator',
         schedules: 'operator',
         dbconfig: 'viewer',
         sqltools: 'operator',
         etl: 'viewer',
+        netsec: 'viewer',
+        infosec: 'operator',
         accounts: 'operator',
         ledger: null,
         rules: 'viewer',
@@ -112,12 +125,15 @@ const ROLE_MODULE_DEFAULTS = {
     '审计员': {
         dashboard: 'viewer',
         hosts: 'viewer',
+        containers: 'viewer',
         tasks: 'viewer',
         scripts: 'viewer',
         schedules: 'viewer',
         dbconfig: 'viewer',
         sqltools: 'viewer',
         etl: null,
+        netsec: 'viewer',
+        infosec: 'viewer',
         accounts: 'viewer',
         ledger: null,
         rules: 'viewer',

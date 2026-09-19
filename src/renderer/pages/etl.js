@@ -31,8 +31,8 @@ const TYPE_TEXT = { integer: '整数', number: '数值', boolean: '布尔', date
 
 const MODE_HINT = {
     insert: '追加写入；主键/唯一键冲突时该批失败',
-    upsert: 'MySQL：冲突时更新非键列（Oracle 暂不支持）',
-    replace: 'MySQL：REPLACE INTO，冲突时先删后插（Oracle 暂不支持）'
+    upsert: 'MySQL：ON DUPLICATE KEY 更新非键列；PostgreSQL：ON CONFLICT DO UPDATE（需填键列）；Oracle 暂不支持',
+    replace: 'MySQL：REPLACE INTO；PostgreSQL：ON CONFLICT 全列更新（需填键列）；Oracle 暂不支持'
 };
 
 let el = {};

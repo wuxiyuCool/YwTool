@@ -1692,6 +1692,14 @@ body.ai-resizing .ai-panel { transition: none; }
 }
 
 .ai-bar-model { flex: 1; }
+.ai-bar-role { flex: 0 1 46%; min-width: 0; }
+.ai-bar-role .select {
+    flex: 1;
+    min-width: 0;
+    padding: 4px 8px;
+    font-size: 12px;
+    height: 28px;
+}
 .ai-bar-model .select {
     flex: 1;
     min-width: 0;
@@ -2106,3 +2114,108 @@ body.ai-resizing .ai-panel { transition: none; }
 .ai-input:focus { outline: none; border-color: var(--primary); }
 
 
+
+/* ---------------- 安全运维（netsec / infosec） ---------------- */
+
+.sec-grid { grid-template-columns: repeat(auto-fit, minmax(430px, 1fr)); }
+
+.sec-out {
+    background: #f7f8fc;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    min-height: 40px;
+    font-size: 12.5px;
+    word-break: break-all;
+    margin-top: 8px;
+}
+
+.sec-out.mono { font-family: var(--mono); }
+
+.code-output {
+    background: #0f1420;
+    color: #d5dcf5;
+    font-family: var(--mono);
+    font-size: 12px;
+    line-height: 1.55;
+    padding: 10px 12px;
+    border-radius: 8px;
+    max-height: 340px;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+    margin: 0;
+}
+
+.sec-qr-result { margin-top: 10px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.sec-qr-img { border: 1px solid var(--border); border-radius: 8px; background: #fff; }
+
+/* 抓包流水行高压缩 */
+#np-tbody td, #nh-tbody td { padding-top: 6px; padding-bottom: 6px; }
+
+/* ---------------- 元数据分类树（SQL 工作台） ---------------- */
+
+.tree-group { margin-bottom: 2px; }
+
+.tree-cat-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 8px;
+    border-radius: 7px;
+    cursor: pointer;
+    user-select: none;
+    font-size: 12.5px;
+    color: var(--text-2);
+}
+
+.tree-cat-head:hover { background: var(--primary-soft); }
+.tree-cat-head .tree-caret { width: 12px; height: 12px; transition: transform 0.15s; }
+.tree-cat-head.open .tree-caret { transform: rotate(90deg); }
+.tree-group-body { padding: 1px 0 4px 10px; }
+
+.tree-title.sub { padding-left: 4px; }
+
+.tree-ddl {
+    background: #f7f8fc;
+    border: 1px solid var(--border);
+    border-radius: 7px;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    line-height: 1.55;
+    padding: 8px 10px;
+    margin: 4px 0 8px 16px;
+    max-height: 260px;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+/* ---------------- 凭据台账 v2（解锁条 / 强度计） ---------------- */
+
+.ledger-bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    background: #f7f8fc;
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    padding: 8px 12px;
+    margin-bottom: 10px;
+}
+
+.ledger-unlock { display: inline-flex; align-items: center; gap: 8px; }
+
+.strength-bar {
+    flex: 1;
+    height: 6px;
+    border-radius: 999px;
+    background: #e8ecf5;
+    overflow: hidden;
+    min-width: 80px;
+}
+
+.strength-bar i { display: block; height: 100%; width: 0; border-radius: 999px; background: var(--text-3); transition: width 0.2s, background 0.2s; }
+.strength-bar i.green { background: var(--success); }
+.strength-bar i.amber { background: var(--warn); }
+.strength-bar i.red { background: var(--danger); }

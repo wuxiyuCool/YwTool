@@ -57,11 +57,85 @@ function seeds() {
             commandTimeout: 15,
             maxRows: 200
         },
-        // AI 用户级偏好：{ username: { model, agentEnabled } }
+        // AI 用户级偏好：{ username: { model, agentEnabled, role } }
         aiUserPrefs: {},
+        // AI 提示词角色（builtin 预设可改不可删；用户可在 AI 面板切换，配置页维护）
+        aiRoles: [
+            {
+                id: 'role_general', name: '通用运维助手', builtin: true,
+                desc: '平台默认角色：全栈运维问答 · 脚本 · 数据库',
+                prompt: `你是 SgOps 批量运维管理平台的 AI 运维助手，服务于内网运维场景。
+能力与约束：
+1. 回答 Linux 服务器运维、Shell/Python 脚本、数据库（Oracle/MySQL/PostgreSQL）运维问题。
+2. 生成脚本时只输出脚本本体，必要时在脚本后用「说明：」简要列出要点，不要输出冗长解释。
+3. 涉及危险命令（删除、格式化、防火墙清空等）必须主动提示风险与安全建议。
+4. 回答保持简洁、可执行、面向运维。`
+            },
+            {
+                id: 'role_script', name: '脚本开发专家', builtin: true,
+                desc: 'Shell / Python 规范、幂等与错误处理',
+                prompt: `你是 SgOps 平台的资深 Shell / Python 开发工程师，为内网 Linux 主机编写运维脚本。
+规则：
+1. Shell 脚本开头写 set -euo pipefail，并做依赖命令存在性检查；Python 以标准库为主，兼容 3.6+。
+2. 脚本必须幂等：重复执行结果安全；任何删除、覆盖前先校验路径与目标。
+3. 平台执行方式：Shell 用 bash -s heredoc 远端执行，Python 写入 /tmp 临时文件执行后清理——禁止交互式输入。
+4. 输出格式：先给完整脚本代码块，再用「说明：」列出参数、依赖、预期输出（不超过 5 行）。
+5. 被要求保存脚本时，若具备 save_script 工具则调用落库到「脚本管理」。`
+            },
+            {
+                id: 'role_dba', name: '数据库管理员（DBA）', builtin: true,
+                desc: 'Oracle / MySQL / PostgreSQL 方言、调优、ETL',
+                prompt: `你是 SgOps 平台的资深 DBA，管理 Oracle、MySQL 8、PostgreSQL 12+ 三类数据源。
+专长：
+1. 方言差异敏感：分页（LIMIT / ROWNUM OFFSET）、UPSERT（ON DUPLICATE KEY / ON CONFLICT / MERGE）、空串语义、大小写标识符规则，回答时必须指明适用数据库。
+2. 平台「数据集成 ETL」支持库对库/文件对库/库对文件，追加/UPSERT/REPLACE 三模式；给迁移方案时结合这些能力，并提醒先试运行。
+3. 性能问题按「执行计划 → 索引 → 统计信息 → 锁与等待」顺序排查，给出诊断 SQL 与优化 DDL。
+4. 任何 DROP / TRUNCATE / 无 WHERE 的 UPDATE DELETE 必须给出备份与回滚步骤，且默认建议走工单确认。
+5. 平台会拦截 DROP DATABASE / DROP SCHEMA，不要提供绕过方法。`
+            },
+            {
+                id: 'role_security', name: '安全合规审查员', builtin: true,
+                desc: '命令风险审查、凭据规范、审计策略',
+                prompt: `你是 SgOps 平台的安全合规审查员。SgOps 是内网单机部署的批量运维平台，具备命令黑白名单、全量审计、AES-256-GCM 凭据加密、口令台账（仅管理员解密）、配置备份信封加密等机制。
+职责：
+1. 审查用户提交的命令/脚本/SQL：指出风险点（破坏性、越权、信息泄露），给出低权限替代方案。
+2. 凭据治理建议：口令强度、有效期轮换、台账最小权限（解密查看必须留痕）、备份口令独立管理。
+3. 评估变更对审计链的影响；高危操作要求先试运行/备份再执行。
+4. 输出格式：风险等级（高/中/低）+ 问题清单 + 整改建议，简洁可落地。
+5. 不提供任何绕过黑白名单、绕过权限体系的方法。`
+            },
+            {
+                id: 'role_docker', name: '容器化工程师', builtin: true,
+                desc: 'Docker / compose / 镜像与日志排障',
+                prompt: `你是 SgOps 平台的容器化工程师，负责 Docker 容器与 compose 编排运维（平台「容器运维」页基于 Docker Engine API，支持本机 socket 与远程 TCP 端点）。
+专长：
+1. 编写 compose.yaml：优先命名卷、healthcheck、restart 策略、资源限制（mem_limit/cpus）、明确网络；日志排障给出 docker logs / exec 检查步骤。
+2. 镜像瘦身：多阶段构建、.dockerignore、基础镜像选择（alpine/distroless 权衡）。
+3. 故障定位按「状态与退出码 → 日志 → 资源限额 → 网络/卷挂载 → 镜像层」顺序。
+4. 涉及生产容器删除、镜像 prune、宿主机文件挂载等风险操作时先提示确认。
+5. 回答给出可直接粘贴的 YAML/命令块，附一行说明。`
+            },
+            {
+                id: 'role_incident', name: '故障根因分析师', builtin: true,
+                desc: '日志解读、时间线、根因与预防',
+                prompt: `你是 SgOps 平台的故障根因分析师。用户会粘贴命令输出、应用日志、告警内容，你负责定位根因。
+方法：
+1. 先重建时间线（按日志时间戳排序关键事件），再区分「直接现象 / 触发条件 / 根本原因」三层。
+2. 给出立即可做的验证命令（只读优先，如 ss / journalctl --since / df -h / 状态查询），需要真实数据且具备工具时调用平台查询类工具。
+3. 结论包含：根因判断、置信度、临时止血方案、长期整改建议，各不超过 3 行。
+4. 信息不足时明确列出还需要哪几条日志/指标，不要臆测。`
+            }
+        ],
         // 数据集成（ETL）：可复用的同步任务 + 最近执行记录
         etlTasks: [],
         etlRuns: [],
+        // 安全运维 · 网络安全：请求案例（Postman 类收藏）+ 发送/抓包历史（滚动上限）
+        apiCases: [],
+        apiHistory: [],
+        // 容器运维：Docker 端点（token 密文；本机场景 kind=pipe）
+        dockerHosts: [
+            { id: 'dh_local', name: '本机 Docker', kind: 'pipe', host: '', port: '', token: '', tags: ['本地'], note: '命名管道 / unix socket', status: 'unknown', lastTestAt: null }
+        ],
         // 模块 → 角色 的界面/功能权限矩阵（未出现的角色使用内置默认值）
         modulePermissions: {
             '运维员': permissionsMod.roleDefaults('运维员'),
@@ -203,7 +277,7 @@ function migrate() {
     let changed = false;
 
     ['hosts', 'scripts', 'rules', 'accounts', 'tasks', 'users', 'dbSources', 'schedules', 'sqlScripts', 'sqlHistory', 'alerts',
-        'etlTasks', 'etlRuns'].forEach(key => {
+        'etlTasks', 'etlRuns', 'apiCases', 'apiHistory', 'dockerHosts'].forEach(key => {
         if (!Array.isArray(db[key])) {
             db[key] = defaults[key] || [];
             changed = true;
@@ -219,6 +293,11 @@ function migrate() {
     // Agent 配置 / 用户级 AI 偏好（老库补默认值，缺失字段由 ai.getAgentConfig 兜底）
     if (!db.aiAgent || typeof db.aiAgent !== 'object' || Array.isArray(db.aiAgent)) { db.aiAgent = defaults.aiAgent; changed = true; }
     if (!db.aiUserPrefs || typeof db.aiUserPrefs !== 'object' || Array.isArray(db.aiUserPrefs)) { db.aiUserPrefs = {}; changed = true; }
+    // 提示词角色（老库缺失 → 写入内置预设；空数组视为已清空也重新播种）
+    if (!Array.isArray(db.aiRoles) || !db.aiRoles.length) {
+        db.aiRoles = defaults.aiRoles;
+        changed = true;
+    }
 
     // 模块权限矩阵（老库没有该集合 → 按角色内置默认值补全）
     if (!db.modulePermissions || typeof db.modulePermissions !== 'object' || Array.isArray(db.modulePermissions)) {
@@ -300,7 +379,8 @@ function upsert(coll, item) {
     const arr = list(coll);
     const prefix = {
         hosts: 'h_', scripts: 's_', rules: 'r_', accounts: 'a_', users: 'u_',
-        dbSources: 'd_', tasks: 'T-', etlTasks: 'et_', etlRuns: 'er_', sqlScripts: 'sq_'
+        dbSources: 'd_', tasks: 'T-', etlTasks: 'et_', etlRuns: 'er_', sqlScripts: 'sq_',
+        dockerHosts: 'dh_', aiRoles: 'ar_'
     }[coll] || 'x_';
     if (item.id) {
         const idx = arr.findIndex(x => x.id === item.id);

@@ -19,11 +19,14 @@
  */
 import * as dashboard from './pages/dashboard.js';
 import * as hosts from './pages/hosts.js';
+import * as containers from './pages/containers.js';
 import * as tasks from './pages/tasks.js';
 import * as scripts from './pages/scripts.js';
 import * as dbconfig from './pages/dbconfig.js';
 import * as sql from './pages/sql.js';
 import * as etl from './pages/etl.js';
+import * as netsec from './pages/netsec.js';
+import * as infosec from './pages/infosec.js';
 import * as sensitive from './pages/sensitive.js';
 import * as audit from './pages/audit.js';
 import * as accounts from './pages/accounts.js';
@@ -47,7 +50,10 @@ const icons = {
     key: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="15" r="4"/><path d="M10.8 12.2L20 3l1.5 1.5-1.5 1.5 1.5 1.5-2.5 2.5-1.5-1.5-2 2"/></svg>',
     spark: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/><path d="M19 15l.9 2.1L22 18l-2.1.9L19 21l-.9-2.1L16 18l2.1-.9z"/></svg>',
     transfer: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 3 21 8 16 13"/><path d="M21 8H9"/><polyline points="8 11 3 16 8 21"/><path d="M3 16h12"/></svg>',
+    activity: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>',
+    lock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/><circle cx="12" cy="16" r="1.5"/></svg>',
     vault: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="12" cy="12" r="4"/><path d="M12 10v2l1.5 1.5"/></svg>',
+    box: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8l-9-5-9 5 9 5 9-5z"/><path d="M3 8v8l9 5 9-5V8"/><path d="M12 13v8"/></svg>',
     gear: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.08a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.08a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.08a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>'
 };
 
@@ -55,10 +61,11 @@ const icons = {
  * 域定义（desc 用于菜单与侧边栏的 hover 提示）
  * id 必须与主进程 menuModel.js / permissions.js 保持一致，由 channel-check 校验
  */
-const domainIcons = { server: icons.server, database: icons.database, system: icons.gear };
+const domainIcons = { server: icons.server, database: icons.database, security: icons.shield, system: icons.gear };
 const domains = [
     { id: 'server', label: '服务器运维', desc: '主机资产 · 批量命令 · 脚本托管' },
     { id: 'database', label: '数据库运维', desc: '数据源配置 · SQL 工作台 · 数据集成' },
+    { id: 'security', label: '安全运维', desc: '抓包重放 · 加解密与二维码工具箱' },
     { id: 'system', label: '系统运维', desc: '用户权限 · 安全规则 · 审计告警 · 运行参数' }
 ].map(d => ({ ...d, icon: domainIcons[d.id] }));
 
@@ -69,11 +76,14 @@ const domains = [
 const pages = {
     dashboard: { label: '总览', sub: '平台运行概览', domain: 'server', icon: icons.dashboard, module: 'dashboard', mod: dashboard },
     hosts: { label: '主机管理', sub: '内网主机资产与 SSH 连接管理', domain: 'server', icon: icons.server, module: 'hosts', mod: hosts },
+    containers: { label: '容器运维', sub: 'Docker 容器管理 · compose 编排 · 容器日志与命令', domain: 'server', icon: icons.box, module: 'containers', mod: containers },
     tasks: { label: '任务执行', sub: '批量命令执行 · 执行前安全校验 · 历史记录', domain: 'server', icon: icons.play, module: 'tasks', mod: tasks },
     scripts: { label: '脚本管理', sub: 'Shell / Python 脚本托管与执行', domain: 'server', icon: icons.code, module: 'scripts', mod: scripts },
     dbconfig: { label: '数据库配置', sub: '数据源增删改查 · 连接测试 · 驱动状态', domain: 'database', icon: icons.plug, module: 'dbconfig', mod: dbconfig },
     sql: { label: 'SQL 工作台', sub: '库表结构浏览 · SQL 脚本执行 · 执行历史', domain: 'database', icon: icons.database, module: 'sqltools', mod: sql },
     etl: { label: '数据集成', sub: '库对库 · 文件对库 · 库对文件 同步向导', domain: 'database', icon: icons.transfer, module: 'etl', mod: etl },
+    netsec: { label: '网络安全', sub: '请求构造重放 · 本地抓包代理 · 断点改包', domain: 'security', icon: icons.activity, module: 'netsec', mod: netsec },
+    infosec: { label: '信息安全', sub: '哈希 · 加解密 · JWT · 二维码工具箱', domain: 'security', icon: icons.lock, module: 'infosec', mod: infosec },
     accounts: { label: '多系统账号', sub: '第三方系统凭据加密存储 · 模拟登录', domain: 'system', icon: icons.key, module: 'accounts', mod: accounts },
     ledger: { label: '凭据台账', sub: '全量账号口令台账 · 解密查看（仅系统管理员）', domain: 'system', icon: icons.vault, module: 'ledger', mod: ledger },
     sensitive: { label: '敏感词配置', sub: '命令拦截规则 · 正则黑名单 · 白名单机制', domain: 'system', icon: icons.shield, module: 'rules', mod: sensitive },

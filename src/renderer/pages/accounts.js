@@ -121,6 +121,11 @@ export function render() {
                         <label>登录密码</label>
                         <input class="input" id="a-password" type="password" placeholder="留空表示不修改">
                     </div>
+                    <div class="form-item" style="flex:0 0 160px">
+                        <label>有效期（可选）</label>
+                        <input class="input" id="a-expires" type="date">
+                        <div class="form-hint">用于台账到期提醒</div>
+                    </div>
                 </div>
                 <div class="form-item">
                     <label>绑定 Python 脚本</label>
@@ -174,6 +179,7 @@ export async function mount(root) {
         root.querySelector('#a-url').value = acc ? acc.url : '';
         root.querySelector('#a-user').value = acc ? acc.user : '';
         root.querySelector('#a-password').value = '';
+        root.querySelector('#a-expires').value = acc ? (acc.expiresAt || '') : '';
         let scripts = [];
         try { scripts = await api.scripts.list(); } catch (err) { /* 忽略 */ }
         const pythonScripts = scripts.filter(s => s.type === 'python');
@@ -203,6 +209,7 @@ export async function mount(root) {
             user: root.querySelector('#a-user').value.trim(),
             scriptName: root.querySelector('#a-script').value,
             password: root.querySelector('#a-password').value,
+            expiresAt: root.querySelector('#a-expires').value || '',
             status: 'ok'
         };
         if (!payload.name || !payload.url || !payload.user) { toast('系统名称、地址、账号均为必填', 'warn'); return; }

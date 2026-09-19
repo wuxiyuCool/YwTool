@@ -3,11 +3,13 @@
  * 通道：ai:config:get|save / ai:test / ai:chat / ai:chat:history|clear
  *       ai:sessions:list|new|switch|delete / ai:script:generate|optimize
  *       ai:model:get|save / ai:agent:get|save|toggle|tools
+ *       ai:roles:list / ai:roles:save|delete（管理员）/ ai:role:save（用户选择默认角色）
  *
  * 安全约束：
- *   - ai:config:save / ai:test 为管理员专属（auth.ADMIN_ONLY）
+ *   - ai:config:save / ai:test / ai:roles:save / ai:roles:delete 为管理员专属（auth.ADMIN_ONLY）
  *   - ai:chat / ai:script:* 为写操作，需 operator 及以上
  *   - 会话按用户隔离（db.aiSessions[username]，多会话 + 激活指针 db.aiActive）
+ *   - 提示词角色只影响 system 提示，不改变任何权限边界
  *   - 每次 AI 调用写入审计日志（含耗时，不含明文内容）
  */
 const store = require('../store');
@@ -177,13 +179,45 @@ function setup(ipcMain) {
         return { ok: true, enabled: !!prefs.agentEnabled };
     });
 
+    /* ---------------- 提示词角色 ---------------- */
+
+    /** 角色清单（全员可读，供面板下拉；prompt 只在配置页编辑时需要，一并返回） */
+    ipcMain.handle('ai:roles:list', () => ({
+        ok: true,
+        roles: ai.listRoles(),
+        current: ai.getUserPrefs(operator()).role || ''
+    }));
+
+    /** 新增 / 修改角色（内置角色可改文案不可删） */
+    ipcMain.handle('ai:roles:save', (e, payload = {}) => {
+        const result = ai.saveRole(payload);
+        if (result.ok) log(`${payload.id ? '修改' : '新增'} AI 提示词角色「${result.role.name}」`);
+        return result;
+    });
+
+    ipcMain.handle('ai:roles:delete', (e, id) => {
+        const role = ai.listRoles().find(r => r.id === id);
+        const result = ai.deleteRole(id);
+        if (result.ok) log(`删除 AI 提示词角色「${(role || {}).name || id}」`);
+        return result;
+    });
+
+    /** 用户设定自己的默认角色（面板下拉变更时调用） */
+    ipcMain.handle('ai:role:save', (e, { roleId } = {}) => {
+        const roles = ai.listRoles();
+        const id = String(roleId || '').trim();
+        if (id && !roles.some(r => r.id === id)) return { ok: false, message: '角色不存在' };
+        ai.saveUserPrefs(operator(), { role: id });
+        return { ok: true, role: id };
+    });
+
     /* ---------------- 对话 ---------------- */
 
     /**
      * 对话：默认流式直答；payload.agent=true 且 Agent 可用时走 function calling 链路
      * steps（工具调用轨迹）经 ai:step 实时推送，不落历史库，仅作为界面过程展示
      */
-    ipcMain.handle('ai:chat', async (event, { messages, agent } = {}) => {
+    ipcMain.handle('ai:chat', async (event, { messages, agent, role } = {}) => {
         const user = operator();
         const list = Array.isArray(messages) ? messages.filter(m => m && typeof m.role === 'string') : [];
         if (!list.length) return { ok: false, message: '消息内容为空' };
@@ -196,12 +230,15 @@ function setup(ipcMain) {
             // Agent 最终以服务端解析为准：即使前端被篡改也拿不到未授权的 Agent 能力
             const state = ai.agentState(user);
             const useAgent = !!agent && state.enabled;
+            // 提示词角色：本次指定 > 用户默认 > 内置通用（roleId 非法时回落，不报错）
+            const system = ai.resolveSystem(role, user);
 
             let text;
             if (useAgent) {
                 const out = await ai.chatAgent(list, {
                     model: ai.resolveModel(user),
                     user,
+                    system,
                     agent: state.global,
                     onDelta: delta => send({ channel: 'ai:stream', delta }),
                     onStep: step => send({ channel: 'ai:step', ...step })
@@ -210,6 +247,7 @@ function setup(ipcMain) {
             } else {
                 text = await ai.chatStream(list, {
                     model: ai.resolveModel(user),
+                    system,
                     onDelta: delta => send({ channel: 'ai:stream', delta })
                 });
             }

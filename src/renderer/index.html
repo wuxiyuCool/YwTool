@@ -75,11 +75,15 @@
                     <!-- 宽度拖拽柄（左侧贴边，拖动调整工作台宽度） -->
                     <div class="ai-resizer" id="ai-resizer" title="拖动调整 AI 工作台宽度（300 - 720px）"></div>
                     <div class="ai-panel-bar">
+                        <div class="ai-bar-item ai-bar-role">
+                            <span class="ai-bar-label">角色</span>
+                            <select class="select" id="ai-role-select" title="切换提示词角色（在「AI 配置」页可维护角色）"></select>
+                        </div>
                         <div class="ai-bar-item ai-bar-model">
                             <span class="ai-bar-label">模型</span>
                             <select class="select" id="ai-model-select" title="切换本次会话使用的模型"></select>
                         </div>
-                        <div class="ai-bar-item ai-bar-agent" id="ai-agent-wrap" title="开启后 AI 可调用平台工具：查询主机 / 生成测试数据 / 保存脚本 / 执行命令 / 查询数据源">
+                        <div class="ai-bar-item ai-bar-agent" id="ai-agent-wrap" title="开启后 AI 可调用平台工具：查询主机 / 数据源与表结构 / 脚本清单 / 生成数据 / 保存脚本 / 本机与远程命令 / 查询容器">
                             <span class="ai-bar-label">Agent</span>
                             <label class="switch">
                                 <input type="checkbox" id="ai-agent-switch">

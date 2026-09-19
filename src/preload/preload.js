@@ -23,6 +23,11 @@ const validChannels = [
     // 主机管理
     'hosts:list', 'hosts:save', 'hosts:delete', 'hosts:test', 'hosts:exec',
 
+    // 容器编排与运维（Docker）
+    'docker:host:list', 'docker:host:save', 'docker:host:delete', 'docker:host:test',
+    'docker:containers', 'docker:images', 'docker:logs', 'docker:run',
+    'docker:stack:run', 'docker:exec', 'docker:compose:run',
+
     // 任务执行
     'tasks:list', 'tasks:detail', 'tasks:validate', 'tasks:run', 'tasks:export',
 
@@ -37,14 +42,24 @@ const validChannels = [
     'accounts:list', 'accounts:save', 'accounts:delete', 'accounts:reveal',
     'accounts:reset', 'accounts:loginTest', 'accounts:policy:save',
 
+    // 安全运维 · 网络安全（请求重放 + 本地抓包代理）
+    'netsec:send', 'netsec:proxy:start', 'netsec:proxy:stop', 'netsec:proxy:status', 'netsec:decision',
+    'netsec:cases:list', 'netsec:case:save', 'netsec:case:delete',
+    'netsec:history:list', 'netsec:history:clear',
+
+    // 安全运维 · 信息安全（哈希 / 对称加解密 / JWT / 二维码）
+    'sec:hash', 'sec:cipher', 'sec:ciphers', 'sec:jwt',
+    'sec:qr:generate', 'sec:qr:decode', 'sec:drivers',
+
     // 凭据台账（聚合查看与解密，仅系统管理员）
-    'ledger:list', 'ledger:reveal',
+    'ledger:list', 'ledger:reveal', 'ledger:unlock', 'ledger:lock', 'ledger:status',
 
     // 日志审计
     'audit:query', 'audit:stats', 'audit:append', 'audit:cleanup', 'audit:paths',
 
     // SQL 工作台
     'sql:execute', 'sql:export', 'db:tables', 'db:describe', 'db:schema',
+    'db:meta', 'db:objects', 'db:ddl',
     'sqlScripts:list', 'sqlScripts:save', 'sqlScripts:delete', 'sqlHistory:list',
 
     // 数据集成（ETL）：库对库 / 文件对库 / 库对文件
@@ -71,7 +86,8 @@ const validChannels = [
     'ai:sessions:list', 'ai:sessions:new', 'ai:sessions:switch', 'ai:sessions:delete',
     'ai:script:generate', 'ai:script:optimize',
     'ai:model:get', 'ai:model:save',
-    'ai:agent:get', 'ai:agent:save', 'ai:agent:toggle', 'ai:agent:tools'
+    'ai:agent:get', 'ai:agent:save', 'ai:agent:toggle', 'ai:agent:tools',
+    'ai:roles:list', 'ai:roles:save', 'ai:roles:delete', 'ai:role:save'
 ];
 
 contextBridge.exposeInMainWorld('electron', {
@@ -84,7 +100,7 @@ contextBridge.exposeInMainWorld('electron', {
 
     /** 主进程主动推送（任务执行进度、告警、菜单导航、AI 流式回复） */
     on: (channel, callback) => {
-        const pushChannels = ['task:progress', 'alert:new', 'schedule:progress', 'menu:navigate', 'ai:stream', 'ai:step', 'data:progress'];
+        const pushChannels = ['task:progress', 'alert:new', 'schedule:progress', 'menu:navigate', 'ai:stream', 'ai:step', 'data:progress', 'netsec:packet', 'netsec:breakpoint'];
         if (!pushChannels.includes(channel)) return () => {};
         const listener = (event, payload) => callback(payload);
         ipcRenderer.on(channel, listener);

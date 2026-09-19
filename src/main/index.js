@@ -11,6 +11,7 @@ const menu = require('./menu');
 const IPC_MODULES = [
     './handlers/authHandler',
     './handlers/hostHandler',
+    './handlers/dockerHandler',
     './handlers/ruleHandler',
     './handlers/taskHandler',
     './handlers/scriptHandler',
@@ -23,6 +24,8 @@ const IPC_MODULES = [
     './handlers/dbConfigHandler',
     './handlers/systemHandler',
     './handlers/backupHandler',
+    './handlers/netsecHandler',
+    './handlers/secHandler',
     './handlers/dashboardHandler',
     './handlers/aiHandler'
 ];

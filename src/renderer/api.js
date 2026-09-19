@@ -53,10 +53,34 @@ function demoFallback(channel, data) {
         case 'sqlScripts:list': return demo.demoSqlScripts;
         case 'sqlHistory:list': return demo.demoSqlHistory;
         case 'db:tables': return demo.demoDbTables(data);
+        case 'db:meta': return {
+            ok: true, type: 'mysql',
+            categories: [
+                { id: 'tables', label: '表' },
+                { id: 'views', label: '视图' },
+                { id: 'procedures', label: '存储过程' },
+                { id: 'functions', label: '函数' },
+                { id: 'triggers', label: '触发器' },
+                { id: 'events', label: '定时事件' }
+            ]
+        };
+        case 'db:objects': {
+            if (data && data.category === 'tables') {
+                const r = demo.demoDbTables(data.sourceId);
+                return { ok: !!(r && r.ok), objects: (r && r.tables) || [] };
+            }
+            return { ok: true, objects: demoMetaObjects(data && data.category) };
+        }
+        case 'db:ddl': return { ok: true, text: `-- 演示模式：${data && data.category} "${data && data.name}" 的定义占位\nSELECT 'demo' /* ${data && data.name} */;` };
         case 'db:schema': return demo.demoDbSchema(data);
         case 'db:describe': return demo.demoDbDescribe(data);
         case 'sql:execute': return demoQuery(data);
         case 'hosts:list': return demo.demoHosts;
+        case 'docker:host:list': return [
+            { id: 'dh_local', name: '本机 Docker（演示）', kind: 'pipe', tags: ['本地'], status: 'unknown', hasToken: false, tokenMasked: '' }
+        ];
+        case 'docker:containers': return { ok: true, containers: [], stacks: [] };
+        case 'docker:images': return { ok: true, images: [] };
         case 'scripts:list': return demo.demoScripts;
         case 'rules:list': return demo.demoRules;
         case 'accounts:list': return demo.demoAccounts;
@@ -73,6 +97,8 @@ function demoFallback(channel, data) {
         case 'system:modules:list': return demo.demoModuleMeta;
         case 'system:perms:get': return demo.demoPerms;
         case 'ai:config:get': return demo.demoAiConfig;
+        case 'ai:roles:list': return { ok: true, current: '', roles: demoAiRoles() };
+        case 'ai:role:save': return { ok: true, role: (data && data.roleId) || '' };
         case 'ai:chat:history': return demo.demoAiHistory;
         case 'ai:chat:clear': return { ok: true };
         case 'ai:sessions:list':
@@ -146,6 +172,14 @@ function demoFallback(channel, data) {
         case 'dbconfig:drivers': return demo.demoDriverMeta;
         case 'ledger:list': return demoLedgerRows();
         case 'ledger:reveal': return { ok: false, message: '演示模式不支持查看明文凭据' };
+        case 'ledger:status': return { ok: true, unlocked: false, until: 0 };
+        case 'ledger:unlock': return { ok: false, message: '演示模式不支持台账解锁' };
+        case 'ledger:lock': return { ok: true };
+        case 'netsec:proxy:status': return { running: false, port: 0, breakpoints: false, httpsTunnel: true, pendingBreakpoints: 0, stats: { requests: 0, tunnels: 0, bytes: 0 } };
+        case 'netsec:cases:list': return [{ id: 'api_demo1', name: '示例：本机健康检查', method: 'GET', url: 'http://127.0.0.1:8080/health', headers: '{}', body: '' }];
+        case 'netsec:history:list': return [];
+        case 'sec:ciphers':
+            return ['AES-128-CBC', 'AES-192-CBC', 'AES-256-CBC', 'AES-128-ECB', 'AES-192-ECB', 'AES-256-ECB', 'AES-128-CTR', 'AES-256-CTR', 'AES-256-GCM', '3DES-CBC', 'RC4'];
         case 'dashboard:overview': return {
             stats: {
                 hostTotal: demo.demoHosts.length,
@@ -176,19 +210,51 @@ function demoFallback(channel, data) {
 /** 演示模式：凭据台账聚合行（与主进程 ledgerHandler 出参同构） */
 function demoLedgerRows() {
     const MASK = '●●●●●●●●';
+    const KIND_LABEL = { account: '业务系统', db: '数据源', host: '主机 SSH', docker: 'Docker 端点' };
+    const GOTO = { account: 'accounts', db: 'dbconfig', host: 'hosts', docker: 'containers' };
+    const wrap = (kind, rest) => ({ kind, kindLabel: KIND_LABEL[kind], goto: GOTO[kind], expiresAt: '', ...rest });
     return [
-        ...(demo.demoAccounts || []).map(a => ({
-            kind: 'account', id: a.id, name: a.name, target: a.url || '-', user: a.user || '-',
-            hasPassword: !!a.password, passwordMasked: a.password ? MASK : '', note: a.scriptName || '', updatedAt: a.lastSyncAt || ''
+        ...(demo.demoAccounts || []).map(a => wrap('account', {
+            id: a.id, name: a.name, target: a.url || '-', user: a.user || '-',
+            hasPassword: !!a.password, passwordMasked: a.password ? MASK : '', note: a.scriptName || '', updatedAt: a.lastSyncAt || '',
+            expiresAt: a.expiresAt || ''
         })),
-        ...(demo.demoDbSources || []).map(s => ({
-            kind: 'db', id: s.id, name: s.name, target: [s.host, s.port, s.database].filter(Boolean).join(':'), user: s.user || '-',
+        ...(demo.demoDbSources || []).map(s => wrap('db', {
+            id: s.id, name: s.name, target: [s.host, s.port, s.database].filter(Boolean).join(':'), user: s.user || '-',
             hasPassword: !!s.password, passwordMasked: s.password ? MASK : '', note: s.type || '', updatedAt: s.lastTestAt || ''
         })),
-        ...(demo.demoHosts || []).filter(h => h.authType === 'password').map(h => ({
-            kind: 'host', id: h.id, name: h.name, target: `${h.ip}:${h.port || 22}`, user: h.user || '-',
+        ...(demo.demoHosts || []).filter(h => h.authType === 'password').map(h => wrap('host', {
+            id: h.id, name: h.name, target: `${h.ip}:${h.port || 22}`, user: h.user || '-',
             hasPassword: !!h.password, passwordMasked: h.password ? MASK : '', note: (h.tags || []).join('、'), updatedAt: h.lastConnectedAt || ''
         }))
+    ];
+}
+
+/** 演示模式：非表类元数据对象样例 */
+function demoMetaObjects(category) {
+    const MAP = {
+        views: [{ name: 'v_app_host', comment: '主机在线视图' }],
+        matviews: [{ name: 'mv_host_daily', comment: '' }],
+        procedures: [{ name: 'sp_cleanup_logs', comment: '' }],
+        functions: [{ name: 'fn_status_text', comment: '' }],
+        packages: [{ name: 'PKG_OPS', comment: 'VALID' }],
+        sequences: [{ name: 'SEQ_TASK_ID', comment: 'MIN 1 MAX 999999 + 1' }],
+        triggers: [{ name: 'trg_host_touch', comment: 'app_host' }],
+        events: [{ name: 'ev_daily_stat', comment: '每日统计' }],
+        jobs: [{ name: 'JOB_HOUSEKEEP', comment: 'ENABLED' }]
+    };
+    return MAP[category] || [];
+}
+
+/** 演示模式：提示词角色预设（与主进程 aiRoles 种子同构，仅展示下拉用） */
+function demoAiRoles() {
+    return [
+        { id: 'role_general', name: '通用运维助手', desc: '平台默认角色', builtin: true },
+        { id: 'role_script', name: '脚本开发专家', desc: 'Shell / Python 规范', builtin: true },
+        { id: 'role_dba', name: '数据库管理员（DBA）', desc: 'Oracle / MySQL / PG', builtin: true },
+        { id: 'role_security', name: '安全合规审查员', desc: '命令与凭据风险', builtin: true },
+        { id: 'role_docker', name: '容器化工程师', desc: 'Docker / compose', builtin: true },
+        { id: 'role_incident', name: '故障根因分析师', desc: '日志与时间线', builtin: true }
     ];
 }
 
@@ -269,12 +335,30 @@ export const api = {
         runNow: id => invoke('schedules:runNow', id)
     },
 
+    /** 主机管理 */
     hosts: {
         list: () => invoke('hosts:list'),
         save: payload => invoke('hosts:save', payload),
         remove: id => invoke('hosts:delete', id),
         test: id => invoke('hosts:test', id),
         exec: (id, cmd) => invoke('hosts:exec', { id, cmd })
+    },
+
+    /** 容器运维（Docker）：端点、容器、镜像、日志、exec、compose */
+    docker: {
+        hosts: {
+            list: () => invoke('docker:host:list'),
+            save: payload => invoke('docker:host:save', payload),
+            remove: id => invoke('docker:host:delete', id),
+            test: id => invoke('docker:host:test', id)
+        },
+        containers: (hostId, all = true) => invoke('docker:containers', { hostId, all }),
+        images: hostId => invoke('docker:images', { hostId }),
+        logs: (hostId, id, tail) => invoke('docker:logs', { hostId, id, tail }),
+        run: (hostId, action, id, force) => invoke('docker:run', { hostId, action, id, force }),
+        stackRun: (hostId, project, action) => invoke('docker:stack:run', { hostId, project, action }),
+        exec: (hostId, id, cmd) => invoke('docker:exec', { hostId, id, cmd }),
+        compose: (yaml, action) => invoke('docker:compose:run', { yaml, action })
     },
 
     tasks: {
@@ -343,10 +427,13 @@ export const api = {
         }
     },
 
-    /** 凭据台账：聚合业务系统 / 数据源 / 主机的账号口令（仅系统管理员） */
+    /** 凭据台账：聚合业务系统 / 数据源 / 主机 / Docker 端点的账号口令（仅系统管理员） */
     ledger: {
         list: () => invoke('ledger:list'),
-        reveal: payload => invoke('ledger:reveal', payload)
+        reveal: payload => invoke('ledger:reveal', payload),
+        unlock: password => invoke('ledger:unlock', { password }),
+        lock: () => invoke('ledger:lock'),
+        status: () => invoke('ledger:status')
     },
 
     /** 数据库配置（数据库运维域 · 独立模块） */
@@ -368,6 +455,10 @@ export const api = {
         tables: sourceId => invoke('db:tables', sourceId),
         describe: (sourceId, table) => invoke('db:describe', { sourceId, table }),
         schema: sourceId => invoke('db:schema', sourceId),
+        /** 元数据对象分类：方言支持的分组（表/视图/存储过程/…） */
+        meta: sourceId => invoke('db:meta', sourceId),
+        objects: (sourceId, category) => invoke('db:objects', { sourceId, category }),
+        ddl: (sourceId, category, name) => invoke('db:ddl', { sourceId, category, name }),
         scripts: {
             list: () => invoke('sqlScripts:list'),
             save: payload => invoke('sqlScripts:save', payload),
@@ -397,6 +488,47 @@ export const api = {
         overview: () => invoke('dashboard:overview')
     },
 
+    /** 安全运维 · 网络安全：请求构造重放（Postman 类）+ 本地抓包代理（Burp 类） */
+    netsec: {
+        send: payload => invoke('netsec:send', payload),
+        proxy: {
+            start: options => invoke('netsec:proxy:start', options),
+            stop: () => invoke('netsec:proxy:stop'),
+            status: () => invoke('netsec:proxy:status')
+        },
+        decision: payload => invoke('netsec:decision', payload),
+        cases: {
+            list: () => invoke('netsec:cases:list'),
+            save: payload => invoke('netsec:case:save', payload),
+            remove: id => invoke('netsec:case:delete', id)
+        },
+        history: (limit = 200) => invoke('netsec:history:list', limit),
+        clearHistory: () => invoke('netsec:history:clear'),
+        /** 抓包流水推送（主进程 → 渲染进程） */
+        onPacket: callback => {
+            if (demoMode || typeof bridge.on !== 'function') return () => {};
+            return bridge.on('netsec:packet', callback);
+        },
+        /** 断点暂停请求推送 */
+        onBreakpoint: callback => {
+            if (demoMode || typeof bridge.on !== 'function') return () => {};
+            return bridge.on('netsec:breakpoint', callback);
+        }
+    },
+
+    /** 安全运维 · 信息安全：哈希 / 对称加解密 / JWT / 二维码（本机计算） */
+    sec: {
+        hash: payload => invoke('sec:hash', payload),
+        cipher: payload => invoke('sec:cipher', payload),
+        ciphers: () => invoke('sec:ciphers'),
+        jwt: payload => invoke('sec:jwt', payload),
+        qr: {
+            generate: payload => invoke('sec:qr:generate', payload),
+            decode: payload => invoke('sec:qr:decode', payload)
+        },
+        drivers: () => invoke('sec:drivers')
+    },
+
     /** AI 助手：模型 / Agent / 对话 / 会话管理 / 脚本生成与优化 */
     ai: {
         config: {
@@ -404,7 +536,7 @@ export const api = {
             save: payload => invoke('ai:config:save', payload)
         },
         test: model => invoke('ai:test', { model }),
-        chat: (messages, agent = false) => invoke('ai:chat', { messages, agent }),
+        chat: (messages, agent = false, role = '') => invoke('ai:chat', { messages, agent, role }),
         chatHistory: () => invoke('ai:chat:history'),
         chatClear: () => invoke('ai:chat:clear'),
         /** 模型切换：读取可选清单 + 保存用户级偏好 */
@@ -418,6 +550,13 @@ export const api = {
             tools: () => invoke('ai:agent:tools'),
             save: payload => invoke('ai:agent:save', payload),
             toggle: enabled => invoke('ai:agent:toggle', { enabled })
+        },
+        /** 提示词角色：清单 / 管理员保存删除 / 用户默认角色选择 */
+        roles: {
+            list: () => invoke('ai:roles:list'),
+            save: payload => invoke('ai:roles:save', payload),
+            remove: id => invoke('ai:roles:delete', id),
+            select: roleId => invoke('ai:role:save', { roleId })
         },
         /** 多会话管理：列表 / 新建 / 切换 / 删除 */
         sessions: {

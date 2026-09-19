@@ -30,7 +30,9 @@ const ADMIN_ONLY = new Set([
     // 配置备份包含凭据明文（信封内），导入会整库覆写：仅系统管理员
     'system:backup:export', 'system:backup:import',
     // 凭据台账：列表与解密查看均仅系统管理员
-    'ledger:list', 'ledger:reveal',
+    'ledger:list', 'ledger:reveal', 'ledger:unlock', 'ledger:lock', 'ledger:status',
+    // 容器运维：端点凭据管理与容器内命令、本机 compose 属高危
+    'docker:host:save', 'docker:host:delete', 'docker:exec', 'docker:compose:run',
     'accounts:reveal', 'accounts:policy:save', 'accounts:save', 'accounts:delete',
     'rules:save', 'rules:delete', 'rules:toggle',
     'audit:cleanup',
@@ -38,11 +40,19 @@ const ADMIN_ONLY = new Set([
     'auth:resetPassword',
     'schedules:save', 'schedules:delete', 'schedules:toggle',
     'sql:execute', 'db:tables', 'db:describe', 'db:schema', 'sql:export',
+    'db:meta', 'db:objects', 'db:ddl',
     'sqlScripts:save', 'sqlScripts:delete',
     'dbconfig:save', 'dbconfig:delete', 'dbconfig:import',
     'ai:config:save', 'ai:test',
+    // 提示词角色定义属平台级配置（会话/权限不受影响），仅管理员维护
+    'ai:roles:save', 'ai:roles:delete',
     // 数据集成（ETL）：批量写库与数据外流均属高危，仅管理员
     'db:etl:run', 'db:etl:tasks:save', 'db:etl:tasks:delete',
+    // 网络安全工作台：外发请求 / 代理 / 断点改包均属高危操作，仅管理员
+    'netsec:send', 'netsec:proxy:start', 'netsec:proxy:stop', 'netsec:decision',
+    'netsec:case:save', 'netsec:case:delete', 'netsec:history:clear',
+    // 二维码解码会加载本地图片文件，生成可外发内容：按写操作对待，仅管理员
+    'sec:qr:decode',
     // Agent 全局能力配置属高危：只有管理员能放开「本机命令 / SQL 执行」等开关
     'ai:agent:save'
 ]);

@@ -1,12 +1,14 @@
 /**
  * SQL 工作台
  * 数据流：
- *   数据源列表 ← system:dbsource:list
- *   库表结构   ← db:schema（失败自动降级为 db:tables 懒加载）
- *   脚本库     ← sqlScripts:list|save|delete
- *   执行 SQL   ← sql:execute（主进程逐条执行，拦截 DROP DATABASE）
- *   执行历史   ← sqlHistory:list
- *   结果导出   ← sql:export（主进程生成 CSV，前端触发下载）
+ *   数据源列表   ← dbconfig:list
+ *   元数据分组   ← db:meta（当前方言支持的对象分类）→ db:objects（分类懒加载）
+ *   表列 / 定义   ← db:describe（表）· db:ddl（视图/过程/触发器/序列/作业等）
+ *   脚本库       ← sqlScripts:list|save|delete
+ *   执行 SQL     ← sql:execute（主进程逐条执行，拦截 DROP DATABASE）
+ *   执行历史     ← sqlHistory:list
+ *   结果导出     ← sql:export（主进程生成 CSV，前端触发下载）
+ * 交互：单击分组头展开分类；单击对象名按方言生成查询片段；双击展开列结构 / 定义文本
  */
 import { api, demoMode } from '../api.js';
 import { esc, toast, demoBanner, emptyRow, loadingRow, shortTime, guardAdmin, applyReadonly } from '../ui.js';
@@ -19,11 +21,40 @@ const TYPE_META = {
     postgres: { label: 'PostgreSQL', badge: 'purple' }
 };
 
+/** 对象分类图标（内联 svg 内容，随分类 id 取用） */
+const CAT_ICONS = {
+    tables: '<ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>',
+    views: '<path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6-10-6-10-6z"/><circle cx="12" cy="12" r="2.5"/>',
+    matviews: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M9 10v10"/>',
+    procedures: '<rect x="4" y="4" width="16" height="16" rx="3"/><path d="M9 8.5l6 3.5-6 3.5z"/>',
+    functions: '<path d="M5 6l4 12 4-12"/><path d="M13 12h6M17 8.5v11"/>',
+    triggers: '<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>',
+    events: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/>',
+    jobs: '<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M8 3v4M16 3v4M3 11h18"/>',
+    sequences: '<path d="M4 8h10M4 16h10"/><polyline points="15 5 19 8 15 11"/><polyline points="15 13 19 16 15 19"/>',
+    packages: '<path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M12 12l8-4.5M12 12v9M12 12L4 7.5"/>'
+};
+
+/** 按方言生成查询片段：表/视图取数、序列取下一值、其它对象插入名称 */
+function querySnippet(sourceType, catId, name, col) {
+    const t = String(sourceType || '');
+    if (catId === 'tables' || catId === 'views' || catId === 'matviews') {
+        if (t === 'oracle') return `SELECT ${col || '*'}\nFROM ${name}\nWHERE rownum <= 100;`;
+        return `SELECT ${col || '*'}\nFROM ${name}\nLIMIT 100;`;
+    }
+    if (catId === 'sequences') {
+        if (t === 'oracle') return `SELECT ${name}.NEXTVAL FROM dual;`;
+        if (t === 'postgres') return `SELECT nextval('${name}');`;
+    }
+    return name;
+}
+
 let sources = [];
 let scripts = [];
 let history = [];
 let activeSourceId = null;
-let schema = [];
+/** 元数据分组：[{ id, label, open, loaded, loading, error, objects: [{ name, comment, open, loading, columns, ddl, error }] }] */
+let cats = [];
 let keyword = '';
 let lastResult = null;
 let editingScriptId = null;
@@ -78,36 +109,62 @@ function scriptItem(s) {
     </div>`;
 }
 
-function schemaTree() {
-    if (!schema.length) return '<div class="empty">暂无库表结构（点击「刷新结构」加载）</div>';
-    const kw = keyword.trim().toLowerCase();
-    const list = kw ? schema.filter(t => (t.name || '').toLowerCase().includes(kw)) : schema;
-    if (!list.length) return `<div class="empty">未找到匹配「${esc(kw)}」的表</div>`;
+/** 表列结构 / 非表对象定义的展开体 */
+function objectBody(cat, o) {
+    if (o.loading) return '<div class="tree-cols muted" style="font-size:11.5px">加载中…</div>';
+    if (cat.id === 'tables') {
+        if (!o.open) return '';
+        if (o.error) return `<div class="tree-cols muted" style="font-size:11.5px">结构读取失败：${esc(o.error)}</div>`;
+        return `<div class="tree-cols">${(o.columns || []).map(c => `
+            <div class="tree-col" data-col="${esc(c.name)}" data-table="${esc(o.name)}" data-cat="tables">
+                <span class="mono">${esc(c.name)}</span>
+                <span class="muted">${esc(c.type || '')}</span>
+                ${c.key === 'PRI' ? '<span class="badge amber" style="font-size:10px;padding:0 4px">PK</span>' : ''}
+            </div>`).join('') || '<span class="muted" style="font-size:11.5px">（无列信息）</span>'}</div>`;
+    }
+    if (!o.open) return '';
+    if (o.error) return `<div class="tree-cols muted" style="font-size:11.5px">定义读取失败：${esc(o.error)}</div>`;
+    return `<pre class="tree-ddl">${esc(o.ddl || '（无定义内容）')}</pre>`;
+}
 
-    return list.map(t => {
-        const count = t.columns !== null
-            ? `${t.columns.length} 列`
-            : (t.loading ? '加载中…' : '');
-        const body = t.loading
-            ? '<div class="tree-cols muted" style="font-size:11.5px">表结构加载中...</div>'
-            : (t.open && t.columns !== null
-                ? `<div class="tree-cols">${t.columns.map(c => `
-                    <div class="tree-col" data-col="${esc(c.name)}" data-table="${esc(t.name)}">
-                        <span class="mono">${esc(c.name)}</span>
-                        <span class="muted">${esc(c.type || '')}</span>
-                        ${c.key === 'PRI' ? '<span class="badge amber" style="font-size:10px;padding:0 4px">PK</span>' : ''}
-                    </div>`).join('')}</div>`
-                : (t.error ? `<div class="tree-cols muted" style="font-size:11.5px">结构读取失败：${esc(t.error)}</div>` : ''));
-        return `
-        <div class="tree-node" data-table="${esc(t.name)}">
-            <div class="tree-title" data-expanded="${t.open ? '1' : '0'}">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:13px;height:13px;flex-shrink:0"><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg>
-                <span class="mono">${esc(t.name)}</span>
-                ${t.comment ? `<span class="muted tree-comment">${esc(t.comment)}</span>` : ''}
-                <span class="tree-count">${count}</span>
-            </div>
-            ${body}
+function objectNode(cat, o) {
+    const meta = cat.id === 'tables'
+        ? (o.columns ? `${o.columns.length} 列` : (o.loading ? '' : '双击看列'))
+        : (o.open && !o.loading ? '' : '双击看定义');
+    return `
+    <div class="tree-node" data-cat="${esc(cat.id)}" data-name="${esc(o.name)}">
+        <div class="tree-title sub" data-expanded="${o.open ? '1' : '0'}">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:12px;height:12px;flex-shrink:0">${CAT_ICONS[cat.id] || CAT_ICONS.tables}</svg>
+            <span class="mono">${esc(o.name)}</span>
+            ${o.comment ? `<span class="muted tree-comment">${esc(o.comment)}</span>` : ''}
+            <span class="tree-count">${meta}</span>
+        </div>
+        ${objectBody(cat, o)}
+    </div>`;
+}
+
+function schemaTree() {
+    if (!cats.length) return '<div class="empty">暂无元数据（点击「刷新结构」加载）</div>';
+    const kw = keyword.trim().toLowerCase();
+    return cats.map(cat => {
+        const objs = kw ? (cat.objects || []).filter(o => `${o.name} ${o.comment || ''}`.toLowerCase().includes(kw)) : cat.objects || [];
+        const head = `
+        <div class="tree-cat-head ${cat.open ? 'open' : ''}" data-cat="${esc(cat.id)}">
+            <svg class="tree-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 6 15 12 9 18"/></svg>
+            <strong>${esc(cat.label)}</strong>
+            <span class="tree-count">${cat.loading ? '加载中…' : (cat.loaded ? `${objs.length}${kw && cat.objects && objs.length !== cat.objects.length ? ` / ${cat.objects.length}` : ''}` : '')}</span>
         </div>`;
+        let body = '';
+        if (cat.open) {
+            body = cat.loading
+                ? '<div class="empty" style="padding:8px">分类加载中…</div>'
+                : (cat.error
+                    ? `<div class="alert warn" style="margin:6px 0 8px;font-size:12px"><span>${esc(cat.error)}</span></div>`
+                    : (objs.length
+                        ? objs.map(o => objectNode(cat, o)).join('')
+                        : `<div class="empty" style="padding:8px">${kw ? '无匹配对象' : '该分类下暂无对象'}</div>`));
+        }
+        return `<div class="tree-group">${head}${body ? `<div class="tree-group-body">${body}</div>` : ''}</div>`;
     }).join('');
 }
 
@@ -218,7 +275,7 @@ export function render() {
                 </div>
                 <div class="schema-toolbar">
                     <input class="input schema-search" id="schema-search" type="text"
-                        placeholder="搜索表名（双击表名加载结构）" autocomplete="off">
+                        placeholder="搜索对象名（单击生成查询，双击展开列/定义）" autocomplete="off">
                 </div>
                 <div class="tree" id="schema-tree"><div class="empty">加载中...</div></div>
             </div>
@@ -369,59 +426,90 @@ export async function mount(root) {
         }
     };
 
-    /* ---------------- 库表结构（懒加载） ---------------- */
+    /* ---------------- 元数据树（分类 + 懒加载） ---------------- */
 
     const renderTree = () => { treeEl.innerHTML = schemaTree(); };
+    const findCat = id => cats.find(c => c.id === id) || null;
 
-    /** 首次只拉表名列表（列结构在双击表名时懒加载） */
+    /** 拉取分类对象清单（tables 走 db:objects，其它同接口） */
+    async function loadCategory(cat) {
+        if (!cat || cat.loaded || cat.loading) return;
+        cat.loading = true;
+        cat.open = true;
+        renderTree();
+        try {
+            const res = await api.sql.objects(activeSourceId, cat.id);
+            if (res && res.ok) {
+                cat.objects = (res.objects || []).map(o => ({
+                    name: o.name, comment: o.comment || '',
+                    open: false, loading: false, columns: null, ddl: '', error: null
+                }));
+                cat.error = null;
+            } else {
+                cat.objects = [];
+                cat.error = (res && res.message) || '分类加载失败';
+            }
+        } catch (err) {
+            cat.objects = [];
+            cat.error = err.message;
+        }
+        cat.loading = false;
+        cat.loaded = true;
+        renderTree();
+    }
+
+    /** 首次只取分组结构 + 表清单（其它分类点开再拉） */
     const loadSchema = async () => {
         const src = currentSource();
         if (!src) { treeEl.innerHTML = '<div class="empty">请先选择数据源</div>'; return; }
         keyword = '';
         searchEl.value = '';
-        schema = [];
+        cats = [];
         treeEl.innerHTML = '<div class="empty">结构加载中...</div>';
         try {
-            const t = await api.sql.tables(src.id);
-            if (!t || !t.ok) {
-                schema = [];
-                treeEl.innerHTML = `<div class="empty">${esc((t && t.message) || '结构加载失败')}</div>`;
+            const meta = await api.sql.meta(src.id);
+            if (!meta || !meta.ok) {
+                treeEl.innerHTML = `<div class="empty">${esc((meta && meta.message) || '元数据加载失败')}</div>`;
                 return;
             }
-            schema = (t.tables || []).map(x => ({
-                name: x.name, comment: x.comment,
-                columns: null, open: false, loading: false, error: null
+            cats = (meta.categories || []).map(c => ({
+                id: c.id, label: c.label,
+                open: c.id === 'tables', loaded: false, loading: false, error: null, objects: null
             }));
             renderTree();
+            await loadCategory(findCat('tables'));
         } catch (err) {
             treeEl.innerHTML = `<div class="empty">结构加载失败：${esc(err.message)}</div>`;
         }
     };
 
-    /** 双击表名：首次请求该表列结构，之后在该表展开 / 收起 */
-    const toggleTable = async name => {
-        const t = schema.find(x => x.name === name);
-        if (!t) return;
-        if (t.columns === null) {
-            if (t.loading) return;
-            t.loading = true;
-            renderTree();
-            try {
+    /** 双击对象：表 → 懒加载列；其它 → 懒加载定义文本 */
+    const toggleObject = async (catId, name) => {
+        const cat = findCat(catId);
+        const o = cat && (cat.objects || []).find(x => x.name === name);
+        if (!o) return;
+        if (o.open) { o.open = false; renderTree(); return; }
+        o.open = true;
+        const needLoad = cat.id === 'tables' ? o.columns === null : !o.ddl && !o.error;
+        if (!needLoad) { renderTree(); return; }
+        o.loading = true;
+        renderTree();
+        try {
+            if (cat.id === 'tables') {
                 const res = await api.sql.describe(activeSourceId, name);
-                t.columns = (res && res.ok) ? (res.columns || []) : [];
-                t.error = (res && !res.ok) ? (res.message || '结构读取失败') : null;
-                t.open = true;
-            } catch (err) {
-                t.columns = [];
-                t.error = err.message;
-                t.open = true;
+                o.columns = (res && res.ok) ? (res.columns || []) : [];
+                o.error = (res && !res.ok) ? (res.message || '结构读取失败') : null;
+            } else {
+                const res = await api.sql.ddl(activeSourceId, cat.id, name);
+                o.ddl = (res && res.ok) ? res.text : '';
+                o.error = (res && !res.ok) ? (res.message || '定义读取失败') : null;
             }
-            t.loading = false;
-            renderTree();
-        } else {
-            t.open = !t.open;
-            renderTree();
+        } catch (err) {
+            if (cat.id === 'tables') o.columns = [];
+            o.error = err.message;
         }
+        o.loading = false;
+        renderTree();
     };
 
     const searchEl = root.querySelector('#schema-search');
@@ -528,28 +616,37 @@ export async function mount(root) {
 
     root.querySelector('#btn-refresh-schema').addEventListener('click', loadSchema);
 
-    // 表 / 字段点击 → 生成查询语句
+    // 单击：分组头展开/收起分类；对象名/列名 → 按方言生成查询片段
     treeEl.addEventListener('click', e => {
+        const head = e.target.closest('.tree-cat-head');
         const col = e.target.closest('.tree-col');
-        const table = e.target.closest('.tree-title');
+        const title = e.target.closest('.tree-title');
+        const srcType = (currentSource() || {}).type;
+        if (head) {
+            const cat = findCat(head.dataset.cat);
+            if (!cat) return;
+            if (cat.open) { cat.open = false; renderTree(); }
+            else if (cat.loaded) { cat.open = true; renderTree(); }
+            else loadCategory(cat);
+            return;
+        }
         if (col) {
-            const sql = `SELECT ${col.dataset.col}\nFROM ${col.dataset.table}\nLIMIT 100;`;
-            inputEl.value = sql;
-        } else if (table) {
-            const name = table.closest('.tree-node').dataset.table;
-            inputEl.value = `SELECT *\nFROM ${name}\nLIMIT 100;`;
+            inputEl.value = querySnippet(srcType, col.dataset.cat || 'tables', col.dataset.table, col.dataset.col);
+        } else if (title) {
+            const node = title.closest('.tree-node');
+            inputEl.value = querySnippet(srcType, node.dataset.cat, node.dataset.name);
         } else {
             return;
         }
         inputEl.focus();
     });
 
-    // 双击表名 → 懒加载并展开该表列结构（首次请求，之后切换展开/收起）
+    // 双击对象名 → 展开/收起列结构或定义文本（懒加载）
     treeEl.addEventListener('dblclick', e => {
         const title = e.target.closest('.tree-title');
         if (!title || e.target.closest('.tree-col')) return;
-        const name = title.closest('.tree-node').dataset.table;
-        if (name) toggleTable(name);
+        const node = title.closest('.tree-node');
+        if (node) toggleObject(node.dataset.cat, node.dataset.name);
     });
 
     // 脚本库

@@ -15,7 +15,9 @@ let keyword = '';
 
 const typeBadge = t => t === 'shell'
     ? '<span class="badge green">Shell</span>'
-    : '<span class="badge purple">Python</span>';
+    : t === 'compose'
+        ? '<span class="badge blue">Compose</span>'
+        : '<span class="badge purple">Python</span>';
 
 function rowHtml(s) {
     return `
@@ -50,6 +52,7 @@ export function render() {
                 <div class="tab active" data-filter="all">全部</div>
                 <div class="tab" data-filter="shell">Shell</div>
                 <div class="tab" data-filter="python">Python</div>
+                <div class="tab" data-filter="compose">Compose</div>
             </div>
             <div class="spacer"></div>
             <input class="input" id="script-search" placeholder="搜索脚本名..." style="width:200px">
@@ -87,6 +90,7 @@ export function render() {
                         <select class="select" id="s-type" style="width:100%">
                             <option value="shell">Shell</option>
                             <option value="python">Python</option>
+                            <option value="compose">Compose 编排文件（在容器运维页执行）</option>
                         </select>
                     </div>
                 </div>
@@ -182,7 +186,8 @@ export async function mount(root) {
             root.querySelector('#script-tabs').innerHTML = `
                 <div class="tab ${filter === 'all' ? 'active' : ''}" data-filter="all">全部 (${scripts.length})</div>
                 <div class="tab ${filter === 'shell' ? 'active' : ''}" data-filter="shell">Shell (${scripts.filter(s => s.type === 'shell').length})</div>
-                <div class="tab ${filter === 'python' ? 'active' : ''}" data-filter="python">Python (${scripts.filter(s => s.type === 'python').length})</div>`;
+                <div class="tab ${filter === 'python' ? 'active' : ''}" data-filter="python">Python (${scripts.filter(s => s.type === 'python').length})</div>
+                <div class="tab ${filter === 'compose' ? 'active' : ''}" data-filter="compose">Compose (${scripts.filter(s => s.type === 'compose').length})</div>`;
         } catch (err) {
             tbody.innerHTML = emptyRow(7, '脚本加载失败：' + err.message);
         }
@@ -349,6 +354,10 @@ export async function mount(root) {
             if (res && res.ok) { toast('脚本已删除', 'success'); await refresh(); }
             else toast('删除失败', 'danger');
         } else if (btn.dataset.act === 'run') {
+            if (script.type === 'compose') {
+                toast('compose 文件请到「服务器运维 → 容器运维」页执行编排', 'info');
+                return;
+            }
             runningScript = script;
             root.querySelector('#run-title').textContent = `执行脚本 · ${script.name}`;
             root.querySelector('#run-result').innerHTML = '';

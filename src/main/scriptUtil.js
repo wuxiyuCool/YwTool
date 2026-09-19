@@ -22,6 +22,9 @@ function wrapPython(content) {
  * @param {{type:string, content:string}} script
  */
 function buildScriptCommand(script) {
+    if (script.type === 'compose') {
+        throw new Error('compose 编排文件请在「服务器运维 → 容器运维」页执行，不走远程脚本通道');
+    }
     return script.type === 'python' ? wrapPython(script.content) : wrapShell(script.content);
 }
 

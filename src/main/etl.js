@@ -114,7 +114,7 @@ const parseColumnList = text => String(text || '')
 
 /** 按数据库方言生成分页语句 */
 function paginate(type, baseSql, offset, size) {
-    if (type === 'mysql') return `${baseSql} LIMIT ${size} OFFSET ${offset}`;
+    if (type === 'mysql' || type === 'postgres') return `${baseSql} LIMIT ${size} OFFSET ${offset}`;
     if (type === 'oracle') {
         const end = offset + size;
         return `SELECT * FROM (SELECT sg_t.*, ROWNUM ${ROWNUM_ALIAS} FROM (${baseSql}) sg_t WHERE ROWNUM <= ${end}) WHERE ${ROWNUM_ALIAS} > ${offset}`;
@@ -545,6 +545,26 @@ function buildBatch(sourceType, table, columns, rows, mode, keyColumns, emptyAsN
         return { sql: `INSERT INTO ${table} (${columns.join(',')}) VALUES ${placeholders}`, params };
     }
 
+    if (sourceType === 'postgres') {
+        if (params.length > 60000) throw new Error('PostgreSQL 单语句参数上限为 65535，请调小「每批行数」');
+        let idx = 0;
+        const placeholders = rows.map(() => `(${columns.map(() => `$${++idx}`).join(',')})`).join(',');
+        const values = `INSERT INTO ${table} (${columns.join(',')}) VALUES ${placeholders}`;
+        const keys = (keyColumns || []).filter(k => columns.includes(k));
+        if ((mode === 'upsert' || mode === 'replace') && keys.length) {
+            // replace 在 PG 用「冲突时更新全部映射列」模拟 REPLACE INTO 的先删后插语义
+            const updateCols = mode === 'replace' ? columns : columns.filter(c => !keys.includes(c));
+            const conflict = updateCols.length
+                ? `ON CONFLICT (${keys.join(',')}) DO UPDATE SET ${updateCols.map(c => `${c}=EXCLUDED.${c}`).join(',')}`
+                : `ON CONFLICT (${keys.join(',')}) DO NOTHING`;
+            return { sql: `${values} ${conflict}`, params };
+        }
+        if (mode === 'upsert' || mode === 'replace') {
+            throw new Error(`PostgreSQL 的「${mode === 'upsert' ? '更新插入' : '替换'}」模式需要填写主键/唯一键列`);
+        }
+        return { sql: values, params };
+    }
+
     throw new Error(dbAdapters.DEP_HINT[sourceType] || `暂不支持的数据库类型：${sourceType}`);
 }
 
@@ -820,7 +840,7 @@ async function runEtl(task = {}, ctx = {}) {
             sampleRows = applyMappingList((source.rows || []).slice(0, 3), mapping, options);
         }
         const planned = source.kind === 'db' ? limit : (source.rows || []).length;
-        const batchSize = writeBatchSize(targetDb, options);
+        const batchSize = writeBatchSize(targetDb, options, Math.max(1, targetColumns.length));
         const plan = {
             ok: true, dryRun: true,
             targetKind, targetTable: targetTable || null, filePath: filePath || null,
@@ -861,7 +881,7 @@ async function runEtl(task = {}, ctx = {}) {
         }
     }
 
-    const batchSize = writeBatchSize(targetDb, options);
+    const batchSize = writeBatchSize(targetDb, options, Math.max(1, targetColumns.length));
     const writer = targetKind === 'file' ? createFileWriter(format, filePath, targetTable || 'data') : null;
     let allRows = [];
 
@@ -968,10 +988,15 @@ function applyMappingList(rows, mapping, options) {
     return (rows || []).map(r => applyMapping(r, mapping, options));
 }
 
-function writeBatchSize(targetDb, options) {
-    if (!targetDb) return WRITE_BATCH_MYSQL;
-    const base = targetDb.type === 'oracle' ? WRITE_BATCH_ORACLE : WRITE_BATCH_MYSQL;
-    return Math.min(Math.max(Number(options.batchSize) || base, 1), base);
+function writeBatchSize(targetDb, options, columnCount = 1) {
+    const base = !targetDb ? WRITE_BATCH_MYSQL
+        : targetDb.type === 'oracle' ? WRITE_BATCH_ORACLE : WRITE_BATCH_MYSQL;
+    let size = Math.min(Math.max(Number(options.batchSize) || base, 1), base);
+    // PostgreSQL 单语句占位符上限 65535：按列数收缩批大小
+    if (targetDb && targetDb.type === 'postgres') {
+        size = Math.min(size, Math.max(1, Math.floor(60000 / Math.max(1, columnCount))));
+    }
+    return size;
 }
 
 /** 执行记录：仅保留最近 RUN_HISTORY_LIMIT 条 */

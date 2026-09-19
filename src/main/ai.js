@@ -76,7 +76,8 @@ const AGENT_DEFAULTS = {
     allowDataGenerate: true, // generate_data
     allowSaveScript: true,   // save_script
     allowLocalExec: false,   // run_local_command（高危，默认关）
-    allowSqlExecute: false,  // execute_sql（高危，默认关）
+    allowRemoteExec: false,  // run_host_command（SSH 远程执行，高危，默认关）
+    allowSqlExecute: false,  // execute_sql / describe_table（数据源侧，默认关）
     commandTimeout: 15,      // 本机命令超时（秒）
     maxRows: 200             // 单工具数据行数上限
 };
@@ -101,6 +102,59 @@ const AGENT_PROMPT = `你现在具备工具调用（Agent）能力，按以下�
 5. 最终回复要说明「调用了哪些工具 + 得到什么结论」，保持简洁。`;
 
 const providerById = id => PROVIDERS.find(p => p.id === id) || null;
+
+/* ------------------------------------------------------------------
+ * 提示词角色（db.aiRoles）
+ * builtin 预设：可在配置页改文案，不可删除；用户自定义角色可增删。
+ * 对话时的 system 取用顺序：本次指定 role > 用户偏好 prefs.role > 内置默认 SYSTEM_PROMPT
+ * ------------------------------------------------------------------ */
+
+function listRoles() {
+    return store.list('aiRoles').map(r => ({
+        id: r.id, name: r.name, desc: r.desc || '',
+        prompt: r.prompt || '', builtin: !!r.builtin
+    }));
+}
+
+function saveRole(payload = {}) {
+    const name = String(payload.name || '').trim();
+    const prompt = String(payload.prompt || '').trim();
+    if (!name) return { ok: false, message: '角色名称不能为空' };
+    if (!prompt) return { ok: false, message: '提示词内容不能为空' };
+    if (prompt.length > 8000) return { ok: false, message: '提示词超过 8000 字符上限' };
+    const prev = store.list('aiRoles').find(r => r.id === payload.id);
+    if (payload.id && !prev) return { ok: false, message: '角色不存在' };
+    const saved = store.upsert('aiRoles', {
+        id: payload.id || undefined,
+        name,
+        desc: String(payload.desc || '').trim(),
+        prompt,
+        builtin: prev ? prev.builtin : false
+    });
+    return { ok: true, role: { id: saved.id, name: saved.name, desc: saved.desc, builtin: !!saved.builtin } };
+}
+
+function deleteRole(id) {
+    const role = store.find('aiRoles', id);
+    if (!role) return { ok: false, message: '角色不存在' };
+    if (role.builtin) return { ok: false, message: `内置角色「${role.name}」不可删除，可编辑覆盖其提示词` };
+    const ok = store.remove('aiRoles', id);
+    // 清理仍指向该角色的用户偏好
+    const prefs = store.get('aiUserPrefs') || {};
+    Object.keys(prefs).forEach(u => {
+        if (prefs[u] && prefs[u].role === id) { delete prefs[u].role; }
+    });
+    store.persist();
+    return { ok };
+}
+
+/** 解析本次对话生效的 system 提示词 */
+function resolveSystem(roleId, username) {
+    const id = String(roleId || '').trim() || (username ? getUserPrefs(username).role : '');
+    if (!id) return SYSTEM_PROMPT;
+    const role = store.list('aiRoles').find(r => r.id === id);
+    return (role && role.prompt) || SYSTEM_PROMPT;
+}
 
 /* ------------------------------------------------------------------
  * 配置读写
@@ -166,7 +220,7 @@ function getAgentConfig() {
 /** Agent 全局配置保存（仅接受已知键，布尔/数值做类型收敛） */
 function saveAgentConfig(payload = {}) {
     const prev = getAgentConfig();
-    const boolKeys = ['enabled', 'allowDataGenerate', 'allowSaveScript', 'allowLocalExec', 'allowSqlExecute'];
+    const boolKeys = ['enabled', 'allowDataGenerate', 'allowSaveScript', 'allowLocalExec', 'allowRemoteExec', 'allowSqlExecute'];
     const limits = {
         maxSteps: [1, 12],
         commandTimeout: [1, 120],
@@ -213,6 +267,7 @@ function saveUserPrefs(username, patch = {}) {
     const next = { ...(prefs[username] || {}) };
     if ('model' in patch) next.model = String(patch.model || '').trim();
     if ('agentEnabled' in patch) next.agentEnabled = !!patch.agentEnabled;
+    if ('role' in patch) next.role = String(patch.role || '').trim();
     prefs[username] = next;
     store.persist();
     return next;
@@ -277,11 +332,11 @@ function assertUsable(cfg, messages) {
  * @returns {Promise<string>} 完整回复文本
  */
 async function chatStream(messages, options = {}) {
-    const { onDelta, model } = options;
+    const { onDelta, model, system } = options;
     const cfg = getConfig();
     assertUsable(cfg, messages);
 
-    const finalMessages = [{ role: 'system', content: SYSTEM_PROMPT }].concat(messages.slice(-24));
+    const finalMessages = [{ role: 'system', content: system || SYSTEM_PROMPT }].concat(messages.slice(-24));
     const res = await fetch(`${cfg.baseURL}/chat/completions`, buildRequest(cfg, finalMessages, { stream: true, model }));
 
     if (!res.ok) throw await httpError(res);
@@ -322,7 +377,7 @@ async function complete(messages, options = {}) {
     const cfg = getConfig();
     assertUsable(cfg, messages);
 
-    const finalMessages = [{ role: 'system', content: SYSTEM_PROMPT }].concat(messages.slice(-24));
+    const finalMessages = [{ role: 'system', content: options.system || SYSTEM_PROMPT }].concat(messages.slice(-24));
     const res = await fetch(`${cfg.baseURL}/chat/completions`, buildRequest(cfg, finalMessages, { stream: false, model: options.model }));
 
     if (!res.ok) throw await httpError(res);
@@ -383,7 +438,7 @@ async function chatAgent(messages, options = {}) {
         .map(t => t.name);
     const tools = allowed.length ? agentTools.toolSchemas(allowed) : null;
 
-    const convo = [{ role: 'system', content: `${SYSTEM_PROMPT}\n\n${AGENT_PROMPT}` }].concat(messages.slice(-16));
+    const convo = [{ role: 'system', content: `${options.system || SYSTEM_PROMPT}\n\n${AGENT_PROMPT}` }].concat(messages.slice(-16));
     const steps = [];
     let text = '';
 
@@ -454,6 +509,7 @@ module.exports = {
     PROVIDERS, DEFAULT_CONFIG, AGENT_DEFAULTS, SYSTEM_PROMPT,
     providerById, getConfig, publicConfig, saveConfig,
     getAgentConfig, saveAgentConfig,
+    listRoles, saveRole, deleteRole, resolveSystem,
     getUserPrefs, saveUserPrefs, resolveModel, agentState,
     chatStream, complete, chatAgent, testConnection
 };

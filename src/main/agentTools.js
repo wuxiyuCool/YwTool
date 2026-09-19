@@ -19,6 +19,8 @@ const store = require('./store');
 const security = require('./security');
 const audit = require('./auditLogger');
 const dbAdapters = require('./dbAdapters');
+const ssh = require('./ssh');
+const containers = require('./containers');
 
 /** 结果文本截断长度（避免长结果撑爆上下文窗口） */
 const MAX_RESULT_CHARS = 1800;
@@ -365,6 +367,135 @@ const TOOLS = {
                 .filter(s => s.enabled !== false)
                 .map(s => ({ id: s.id, name: s.name, type: s.type, host: s.host, port: s.port, database: s.database }));
             return { ok: true, count: list.length, sources: list };
+        }
+    },
+
+    /** 表结构查看：配合 execute_sql 做数据问题诊断（同属数据源能力开关） */
+    describe_table: {
+        name: 'describe_table',
+        label: '查看表结构',
+        desc: '查询数据源中某张表的列结构（名称/类型/可空/主键/默认值），只读元数据',
+        risk: '低危',
+        gate: 'allowSqlExecute',
+        schema: {
+            type: 'object',
+            properties: {
+                sourceId: { type: 'string', description: '数据源 id（list_db_sources 可查）' },
+                table: { type: 'string', description: '表名（仅限字母数字下划线）' }
+            },
+            required: ['sourceId', 'table']
+        },
+        async run(args = {}, ctx = {}) {
+            const source = store.list('dbSources').find(s => s.id === String(args.sourceId || ''));
+            if (!source) return { ok: false, error: '数据源不存在或已被删除' };
+            if (source.enabled === false) return { ok: false, error: `数据源「${source.name}」已停用` };
+            try {
+                const columns = await dbAdapters.describeTable(source, String(args.table || ''));
+                audit.write({ type: '操作', user: ctx.user || '-', detail: `AI Agent 查看表结构：${source.name} · ${args.table}` });
+                return { ok: true, sourceName: source.name, type: source.type, table: args.table, columns: columns.slice(0, 200) };
+            } catch (err) {
+                return { ok: false, error: err.message };
+            }
+        }
+    },
+
+    /** 脚本库清单：配合 save_script / 脚本执行链路 */
+    list_scripts: {
+        name: 'list_scripts',
+        label: '查询脚本清单',
+        desc: '列出「脚本管理」中托管的 Shell / Python / Compose 脚本（名称/类型/版本/描述），不含正文',
+        risk: '只读',
+        gate: null,
+        schema: {
+            type: 'object',
+            properties: {
+                keyword: { type: 'string', description: '按名称/描述过滤，可留空' }
+            }
+        },
+        async run(args = {}) {
+            const kw = String(args.keyword || '').trim().toLowerCase();
+            const list = store.list('scripts')
+                .filter(s => !kw || `${s.name} ${s.desc || ''}`.toLowerCase().includes(kw))
+                .slice(0, 60)
+                .map(s => ({ id: s.id, name: s.name, type: s.type, version: s.version, desc: s.desc || '' }));
+            return { ok: true, count: list.length, scripts: list };
+        }
+    },
+
+    /** 远程主机执行单条命令：独立开关，默认关闭；同样过黑白名单 */
+    run_host_command: {
+        name: 'run_host_command',
+        label: '远程主机执行命令',
+        desc: '在平台纳管的某台主机（SSH）上执行一条命令并返回输出；受敏感词黑白名单约束，建议先用 list_hosts 获取 hostId',
+        risk: '高危',
+        gate: 'allowRemoteExec',
+        schema: {
+            type: 'object',
+            properties: {
+                hostId: { type: 'string', description: '主机 id（list_hosts 可查）' },
+                command: { type: 'string', description: '待执行的 Shell 命令（单条）' }
+            },
+            required: ['hostId', 'command']
+        },
+        async run(args = {}, ctx = {}) {
+            const host = store.list('hosts').find(h => h.id === String(args.hostId || ''));
+            if (!host) return { ok: false, error: '主机不存在，请先用 list_hosts 查询' };
+            const command = String(args.command || '').trim();
+            if (!command) return { ok: false, error: '命令为空' };
+            if (/[\r\n]/.test(command)) return { ok: false, error: '仅支持单行命令；多步操作请生成脚本走「任务执行」' };
+
+            const check = security.validate(command, { user: ctx.user, source: `AI Agent → ${host.name}` });
+            if (!check.ok) {
+                audit.write({ type: '拦截', user: ctx.user || '-', detail: `AI Agent 远程命令被拦截（${host.name}）：${command}`, result: 'blocked' });
+                return { ok: false, blocked: true, error: check.reason };
+            }
+            const started = Date.now();
+            const res = await ssh.execOnHost(host, command, store.get('config').cmdTimeout || 30);
+            audit.write({
+                type: '命令', user: ctx.user || '-', source: 'AI Agent',
+                detail: `AI Agent 在 ${host.name}（${host.ip}）执行：${command.slice(0, 200)}`,
+                result: res.status === 'success' ? 'success' : 'failed'
+            });
+            return {
+                ok: res.status === 'success',
+                host: host.name,
+                ip: host.ip,
+                durationMs: Date.now() - started,
+                output: clamp(String(res.output || '')),
+                error: res.status === 'success' ? undefined : (res.error || '执行失败')
+            };
+        }
+    },
+
+    /** 容器概览：只读，默认本机 Docker 端点，可传端点 id */
+    list_containers: {
+        name: 'list_containers',
+        label: '查询容器清单',
+        desc: '查询 Docker 端点上的容器（名称/镜像/状态/compose 项目）；不传 hostId 时使用本机默认端点',
+        risk: '只读',
+        gate: null,
+        schema: {
+            type: 'object',
+            properties: {
+                hostId: { type: 'string', description: 'Docker 端点 id（可留空 = 本机第一个端点）' },
+                runningOnly: { type: 'boolean', description: '仅看运行中容器，默认 false' }
+            }
+        },
+        async run(args = {}) {
+            const hosts = store.list('dockerHosts');
+            const host = args.hostId ? hosts.find(h => h.id === String(args.hostId)) : hosts[0];
+            if (!host) return { ok: false, error: '未配置 Docker 端点（请到「服务器运维 → 容器运维」添加）' };
+            try {
+                const list = await containers.listContainers(host, !args.runningOnly);
+                return {
+                    ok: true, endpoint: host.name, count: list.length,
+                    containers: list.slice(0, 80).map(c => ({
+                        id: c.id, name: c.name, image: c.image, state: c.state, status: c.status, project: c.project || ''
+                    }))
+                };
+            } catch (err) {
+                return { ok: false, error: err.message };
+            }
         }
     }
 };

@@ -1,6 +1,7 @@
 /**
  * SQL 工作台 IPC
  * 通道：sql:execute / sql:export / db:tables / db:describe / db:schema
+ *       db:meta / db:objects / db:ddl（元数据对象分类：视图/过程/触发器/序列/作业）
  *       sqlScripts:list|save|delete / sqlHistory:list
  *       db:etl:preview|run|pickFile / db:etl:tasks:list|save|delete / db:etl:runs（数据集成 ETL）
  *
@@ -164,6 +165,37 @@ function setup(ipcMain) {
         try {
             const tables = await dbAdapters.listTables(source);
             return { ok: true, tables };
+        } catch (err) {
+            return { ok: false, message: err.message };
+        }
+    });
+
+    /* ---------------- 元数据对象分类（视图 / 过程 / 触发器 / 序列 / 作业…） ---------------- */
+
+    /** 当前数据源方言支持的对象分类清单（前端结构树分组渲染） */
+    ipcMain.handle('db:meta', (e, sourceId) => {
+        const source = store.find('dbSources', sourceId);
+        if (!source) return { ok: false, message: '数据源不存在' };
+        return { ok: true, type: source.type, categories: dbAdapters.metaObjects(source) };
+    });
+
+    ipcMain.handle('db:objects', async (e, { sourceId, category } = {}) => {
+        const source = store.find('dbSources', sourceId);
+        if (!source) return { ok: false, message: '数据源不存在' };
+        try {
+            const objects = await dbAdapters.listObjects(source, String(category || ''));
+            return { ok: true, objects };
+        } catch (err) {
+            return { ok: false, message: err.message };
+        }
+    });
+
+    ipcMain.handle('db:ddl', async (e, { sourceId, category, name } = {}) => {
+        const source = store.find('dbSources', sourceId);
+        if (!source) return { ok: false, message: '数据源不存在' };
+        try {
+            const text = await dbAdapters.objectDdl(source, String(category || ''), String(name || ''));
+            return { ok: true, text: text || '-- （无定义内容）' };
         } catch (err) {
             return { ok: false, message: err.message };
         }

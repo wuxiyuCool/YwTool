@@ -29,6 +29,8 @@ let sessionsListEl = null;
 let confirmEl = null;
 let modelTagEl = null;
 let modelSelEl = null;      // 模型切换下拉
+let roleSelEl = null;       // 提示词角色下拉
+let currentRole = '';
 let agentSwitchEl = null;   // Agent 开关
 let agentWrapEl = null;
 let resizerEl = null;
@@ -300,7 +302,7 @@ async function send() {
         outbound.push(...history, { role: 'user', content: text });
 
         // 流式：delta 由 onAiStream 回填；完整文本在返回值中；Agent 轨迹由 onAiStep 推送
-        const res = await api.ai.chat(outbound, agentEnabled);
+        const res = await api.ai.chat(outbound, agentEnabled, currentRole);
         if (res && res.ok) {
             messages = messages.concat([{ role: 'assistant', content: res.text }]);
             if (streamingEl) finalizeStreaming(res.text);
@@ -541,7 +543,22 @@ function toggle(force) {
     }
 }
 
-/* ---------------- 模型切换 / Agent 开关 ---------------- */
+/* ---------------- 模型切换 / 提示词角色 / Agent 开关 ---------------- */
+
+/** 加载提示词角色下拉（管理员在「AI 配置」维护；选中即存为用户默认，跨重启保留） */
+async function loadRoles() {
+    if (!roleSelEl) return;
+    try {
+        const res = await api.ai.roles.list();
+        if (!res || !res.ok) return;
+        const roles = res.roles || [];
+        currentRole = res.current && roles.some(r => r.id === res.current) ? res.current : '';
+        roleSelEl.innerHTML = roles.map(r =>
+            `<option value="${esc(r.id)}"${r.id === currentRole ? ' selected' : ''}>${esc(r.name)}</option>`).join('')
+            || '<option value="">默认助手</option>';
+        roleSelEl.title = roles.length ? '切换提示词角色' : '尚无角色，请到「AI 配置」添加';
+    } catch (err) { /* 静默：角色为增强能力 */ }
+}
 
 /** 渲染模型下拉：按提供方分组，含当前生效模型 */
 function paintModels(info) {
@@ -643,6 +660,12 @@ async function toggleAgent(enabled) {
 function bindEvents() {
     sendBtn.addEventListener('click', send);
     if (modelSelEl) modelSelEl.addEventListener('change', () => switchModel(modelSelEl.value));
+    if (roleSelEl) roleSelEl.addEventListener('change', async () => {
+        currentRole = roleSelEl.value;
+        api.ai.roles.select(currentRole).catch(() => { });
+        const hit = (roleSelEl.selectedOptions[0] || {}).textContent;
+        toast(`已切换提示词角色：${hit || '默认'}`, 'info');
+    });
     if (agentSwitchEl) agentSwitchEl.addEventListener('change', () => toggleAgent(agentSwitchEl.checked));
     inputEl.addEventListener('keydown', e => {
         if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
@@ -818,6 +841,7 @@ export function init() {
     confirmEl = panel.querySelector('#ai-confirm');
     modelTagEl = panel.querySelector('#ai-model-tag');
     modelSelEl = panel.querySelector('#ai-model-select');
+    roleSelEl = panel.querySelector('#ai-role-select');
     agentSwitchEl = panel.querySelector('#ai-agent-switch');
     agentWrapEl = panel.querySelector('#ai-agent-wrap');
     resizerEl = panel.querySelector('#ai-resizer');
@@ -827,6 +851,7 @@ export function init() {
     paintContext();
     paintAgent();
     loadModels();
+    loadRoles();
     loadAgent();
 
     // 常驻工作台：默认展开（可手动收起，Shift+A 随时唤回）

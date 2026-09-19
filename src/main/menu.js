@@ -72,11 +72,19 @@ function buildTemplate() {
                     click: () => send({ type: 'domain', id: 'database' })
                 },
                 {
+                    label: '安全运维',
+                    type: 'checkbox',
+                    checked: snapshot.domain === 'security',
+                    enabled: domainEnabled('security'),
+                    accelerator: 'CmdOrCtrl+3',
+                    click: () => send({ type: 'domain', id: 'security' })
+                },
+                {
                     label: '系统运维',
                     type: 'checkbox',
                     checked: snapshot.domain === 'system',
                     enabled: domainEnabled('system'),
-                    accelerator: 'CmdOrCtrl+3',
+                    accelerator: 'CmdOrCtrl+4',
                     click: () => send({ type: 'domain', id: 'system' })
                 },
                 { type: 'separator' },
