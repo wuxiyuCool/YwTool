@@ -313,7 +313,9 @@ export function render() {
                         </div>
                         <div class="form-item">
                             <label>每批行数</label>
-                            <input class="input" id="etl-batch" type="number" min="1" value="500">
+                            <input class="input" id="etl-batch" type="number" min="1" max="5000" value="500"
+                                   title="留大些更快（Oracle 数组绑定建议 1000+）；PostgreSQL 会按列数自动收缩到占位符上限内">
+                            <div class="form-hint">1~5000，超上限自动取 5000</div>
                         </div>
                         <div class="form-item">
                             <label>失败处理</label>

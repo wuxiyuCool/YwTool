@@ -192,6 +192,99 @@ async function query(source, sql, params = []) {
 }
 
 /**
+ * 任务级连接会话：ETL 全程复用一条连接，避免每批「建连→认证→关闭」的秒级开销（Oracle 尤其明显）。
+ * 与 query() 不同：调用方负责 close()，建议 try/finally。
+ * @returns {Promise<{type, query(sql,params), executeMany?(sql,bindRows), close()}>}
+ */
+async function openSession(source) {
+    if (source.type === 'mysql') {
+        const mysql = loadDriver('mysql2/promise');
+        if (!mysql) throw new Error(DEP_HINT.mysql);
+        const conn = await mysql.createConnection({
+            host: source.host, port: source.port || 3306, user: source.user,
+            password: decrypt(source.password), database: source.database || undefined
+        });
+        return {
+            type: 'mysql',
+            async query(sql, params = []) {
+                const [res] = await conn.query(sql, params);
+                if (Array.isArray(res)) {
+                    return { columns: res[0] ? Object.keys(res[0]) : [], rows: res, affectedRows: null };
+                }
+                return { columns: [], rows: [], affectedRows: res.affectedRows, info: res.info };
+            },
+            close: () => conn.end().catch(() => {})
+        };
+    }
+
+    if (source.type === 'oracle') {
+        const oracledb = loadDriver('oracledb');
+        if (!oracledb) throw new Error(DEP_HINT.oracle);
+        const conn = await oracledb.getConnection({
+            user: source.user, password: decrypt(source.password),
+            connectString: `${source.host}:${source.port || 1521}/${source.database}`
+        });
+        return {
+            type: 'oracle',
+            async query(sql, params = []) {
+                const isDml = /^\s*(insert|update|delete|merge)\b/i.test(sql);
+                const result = await conn.execute(sql, params, {
+                    outFormat: oracledb.OUT_FORMAT_OBJECT, autoCommit: isDml
+                });
+                const rows = Array.isArray(result.rows) ? result.rows : [];
+                return {
+                    columns: result.metaData ? result.metaData.map(m => m.name) : [],
+                    rows,
+                    affectedRows: result.rowsAffected != null && rows.length === 0 ? result.rowsAffected : null
+                };
+            },
+            /**
+             * 数组绑定批量执行（Oracle 原生批处理，一次往返）；batchErrors 让单行失败不拖垮整批。
+             * @param {string} sql 单行语句（:1..:n 位置绑定）
+             * @param {Array<Array>} bindRows 每行的绑定数组
+             * @returns {Promise<{rowsAffected:number, batchErrors:Array<{offset:number,message:string}>}>}
+             */
+            async executeMany(sql, bindRows) {
+                const result = await conn.executeMany(sql, bindRows, { autoCommit: true, batchErrors: true });
+                return {
+                    rowsAffected: typeof result.rowsAffected === 'number' ? result.rowsAffected : 0,
+                    batchErrors: (result.batchErrors || []).map(e => ({
+                        offset: e.offset,
+                        // oracledb thin 返回 {offset, message}；兼容 {error} 形态
+                        message: String(e.message || (e.error && e.error.message) || e.error || e)
+                    }))
+                };
+            },
+            close: () => conn.close().catch(() => {})
+        };
+    }
+
+    if (source.type === 'postgres') {
+        const pg = loadDriver('pg');
+        if (!pg) throw new Error(DEP_HINT.postgres);
+        const client = new pg.Client({
+            host: source.host, port: source.port || 5432, user: source.user,
+            password: decrypt(source.password), database: source.database || undefined
+        });
+        await client.connect();
+        return {
+            type: 'postgres',
+            async query(sql, params = []) {
+                const res = await client.query(sql, params);
+                return {
+                    columns: res.fields && res.fields.length ? res.fields.map(f => f.name) : (res.rows[0] ? Object.keys(res.rows[0]) : []),
+                    rows: res.rows || [],
+                    affectedRows: typeof res.rowCount === 'number' && !(res.rows || []).length ? res.rowCount : null
+                };
+            },
+            close: () => client.end().catch(() => {})
+        };
+    }
+
+    throw UNSUPPORTED(source.type);
+}
+
+/**
  * 表清单（含注释）
  * 返回：[{ name, comment }]
  */
@@ -494,6 +587,6 @@ function driverStatus() {
 }
 
 module.exports = {
-    testConnection, query, listTables, describeTable, driverStatus, DEP_HINT,
+    testConnection, query, openSession, listTables, describeTable, driverStatus, DEP_HINT,
     metaObjects, listObjects, objectDdl
 };

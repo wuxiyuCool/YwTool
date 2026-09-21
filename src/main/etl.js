@@ -36,7 +36,9 @@ const dbAdapters = require('./dbAdapters');
 const READ_BATCH = 1000;
 /** 目标端单批写入行数 */
 const WRITE_BATCH_MYSQL = 500;
-const WRITE_BATCH_ORACLE = 200;
+const WRITE_BATCH_ORACLE = 1000;   // executeMany 数组绑定，无多行 VALUES 的尺寸顾虑
+/** 用户可自定义的每批行数上限（留空时用上面的方言默认值） */
+const MAX_WRITE_BATCH = 5000;
 /** 单次任务行数上限（防误操作把整表搬飞） */
 const MAX_ROWS = 1000000;
 const DEFAULT_LIMIT = 50000;
@@ -620,6 +622,15 @@ function normalizeValue(v, emptyAsNull = true) {
     return v;
 }
 
+/** 字符串日期直绑 DATE 列会 ORA-01861（依 NLS 格式），统一转成 Date 由驱动绑定 */
+function oraBindValue(v) {
+    if (typeof v === 'string' && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}(:\d{2})?$/.test(v)) {
+        const d = new Date(v.replace(' ', 'T'));
+        return Number.isNaN(d.getTime()) ? v : d;
+    }
+    return v;
+}
+
 /**
  * 构造单批写入语句（参数化）
  * @returns {{sql:string, params:Array}}
@@ -648,22 +659,9 @@ function buildBatch(sourceType, table, columns, rows, mode, keyColumns, emptyAsN
     if (sourceType === 'oracle') {
         if (mode === 'upsert') throw new Error('Oracle 的 UPSERT 需要 MERGE 语句，当前版本未开放，请使用「追加」模式');
         if (mode === 'replace') throw new Error('Oracle 不支持 REPLACE INTO，请使用「追加」模式');
-        let idx = 0;
-        const one = () => columns.map(() => `:${++idx}`).join(',');
-        // 字符串日期直绑 DATE 列会 ORA-01861（依 NLS 格式），统一转成 Date 由驱动绑定
-        const oraParams = params.map(v => {
-            if (typeof v === 'string' && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}(:\d{2})?$/.test(v)) {
-                const d = new Date(v.replace(' ', 'T'));
-                return Number.isNaN(d.getTime()) ? v : d;
-            }
-            return v;
-        });
-        // Oracle 不支持多行 VALUES（ORA-00933）：单行直插，多行走 INSERT ALL ... SELECT FROM DUAL
-        if (rows.length === 1) {
-            return { sql: `INSERT INTO ${table} (${columns.join(',')}) VALUES (${one()})`, params: oraParams };
-        }
-        const all = rows.map(() => `INTO ${table} (${columns.join(',')}) VALUES (${one()})`).join(' ');
-        return { sql: `INSERT ALL ${all} SELECT 1 FROM DUAL`, params: oraParams };
+        // 实际执行走 executeMany 数组绑定（单行 SQL + 二维参数）：一次往返、不受多行 VALUES 语法与绑定上限约束
+        const bindRows = rows.map(r => columns.map(c => oraBindValue(normalizeValue(r[c], emptyAsNull))));
+        return { sql: `INSERT INTO ${table} (${columns.join(',')}) VALUES (${columns.map((_, i) => `:${i + 1}`).join(',')})`, params, bindRows };
     }
 
     if (sourceType === 'postgres') {
@@ -839,15 +837,17 @@ async function previewSource(source = {}) {
     if (prepared.error) return { ok: false, message: prepared.error };
 
     if (prepared.kind === 'db') {
+        let session = null;
         try {
-            const res = stripRowNum(await dbAdapters.query(prepared.db, paginate(prepared.db.type, prepared.baseSql, 0, SAMPLE_ROWS)));
+            session = await dbAdapters.openSession(prepared.db);
+            const res = stripRowNum(await session.query(paginate(prepared.db.type, prepared.baseSql, 0, SAMPLE_ROWS)));
             const rows = res.rows || [];
             const columns = (res.columns || []).map(name => ({
                 name, type: inferType(rows.slice(0, 50).map(r => r[name]))
             }));
             let total = null;
             try {
-                const countRes = await dbAdapters.query(prepared.db, `SELECT COUNT(*) AS c FROM (${prepared.baseSql}) sg_cnt`);
+                const countRes = await session.query(`SELECT COUNT(*) AS c FROM (${prepared.baseSql}) sg_cnt`);
                 const first = (countRes.rows || [])[0];
                 const key = first ? Object.keys(first).find(k => k.toLowerCase() === 'c') : null;
                 if (key) total = Number(first[key]);
@@ -855,6 +855,8 @@ async function previewSource(source = {}) {
             return { ok: true, kind: 'db', columns, sample: rows, total, label: prepared.label };
         } catch (err) {
             return { ok: false, message: `源端采样失败：${err.message}` };
+        } finally {
+            if (session) await session.close();
         }
     }
 
@@ -1002,87 +1004,119 @@ async function runEtl(task = {}, ctx = {}) {
     // ---- 5. 正式执行 ----
     report({ phase: 'start', read: 0, written: 0, batches: 0, message: '任务启动' });
 
-    if (targetKind === 'db' && options.clearFirst === true) {
-        try {
-            // eslint-disable-next-line no-await-in-loop
-            await dbAdapters.query(targetDb, `DELETE FROM ${targetTable}`);
-            log(`ETL：导入前清空目标表「${targetTable}」（用户显式确认）`);
-        } catch (err) {
-            return { ok: false, message: `清空目标表失败，已中止：${err.message}` };
-        }
-    }
-
-    const batchSize = writeBatchSize(targetDb, options, Math.max(1, targetColumns.length));
-    const writer = targetKind === 'file' ? createFileWriter(format, filePath, targetTable || 'data') : null;
-    let allRows = [];
-
+    // ---- 任务级连接复用：Oracle 建连需秒级开销，全程各持一条源/目标连接 ----
+    let targetSession = null;
+    let sourceSession = null;
+    let saved = {};
     const stats = { read: 0, written: 0, failed: 0, batches: 0 };
     const errors = [];
-
-    /** 处理一批源行：映射 → 写入目标 */
-    async function consume(rawRows) {
-        if (!rawRows.length) return;
-        stats.read += rawRows.length;
-        const rows = applyMappingList(rawRows, mapping, options);
-
-        if (targetKind === 'file') {
-            if (format === 'xlsx') allRows = allRows.concat(rows);
-            else writer.write(rows);
-            stats.written += rows.length;
-            return;
-        }
-
-        for (let i = 0; i < rows.length; i += batchSize) {
-            const slice = rows.slice(i, i + batchSize);
-            try {
-                const batch = buildBatch(targetDb.type, targetTable, targetColumns, slice,
-                    options.mode || 'insert', options.keyColumns || [], options.emptyAsNull !== false);
-                // eslint-disable-next-line no-await-in-loop
-                const res = await dbAdapters.query(targetDb, batch.sql, batch.params);
-                stats.written += res.affectedRows || slice.length;
-                stats.batches++;
-            } catch (err) {
-                errors.push({ batch: stats.batches + 1, rows: slice.length, message: err.message });
-                stats.failed += slice.length;
-                if (options.stopOnError !== false) return;
+    try {
+        if (targetKind === 'db') {
+            targetSession = await dbAdapters.openSession(targetDb);
+            if (options.clearFirst === true) {
+                try {
+                    // eslint-disable-next-line no-await-in-loop
+                    await targetSession.query(`DELETE FROM ${targetTable}`);
+                    log(`ETL：导入前清空目标表「${targetTable}」（用户显式确认）`);
+                } catch (err) {
+                    return { ok: false, message: `清空目标表失败，已中止：${err.message}` };
+                }
             }
         }
-    }
-
-    if (source.kind === 'db') {
-        for (let offset = 0; offset < limit; offset += READ_BATCH) {
-            const size = Math.min(READ_BATCH, limit - offset);
+        if (source.kind === 'db') {
             // eslint-disable-next-line no-await-in-loop
-            const res = stripRowNum(await dbAdapters.query(source.db, paginate(source.db.type, source.baseSql, offset, size)));
-            const rows = res.rows || [];
-            // eslint-disable-next-line no-await-in-loop
-            await consume(rows);
-            report({
-                phase: 'running', read: stats.read, written: stats.written,
-                batches: stats.batches, message: `已读取 ${stats.read} 行`
-            });
-            if (rows.length < size) break;
-            if (errors.length && options.stopOnError !== false) break;
+            sourceSession = await dbAdapters.openSession(source.db);
         }
-    } else {
-        const rows = source.rows || [];
-        const capped = rows.slice(0, limit);
-        for (let i = 0; i < capped.length; i += READ_BATCH) {
-            // eslint-disable-next-line no-await-in-loop
-            await consume(capped.slice(i, i + READ_BATCH));
-            report({
-                phase: 'running', read: stats.read, written: stats.written,
-                batches: stats.batches, message: `已处理 ${stats.read} 行`
-            });
-            if (errors.length && options.stopOnError !== false) break;
-        }
-    }
 
-    let saved = {};
-    if (targetKind === 'file') {
-        saved = writer.save(allRows);
-        if (saved.error) return { ok: false, message: saved.error };
-        stats.batches = Math.ceil(stats.read / READ_BATCH);
+        const batchSize = writeBatchSize(targetDb, options, Math.max(1, targetColumns.length));
+        const writer = targetKind === 'file' ? createFileWriter(format, filePath, targetTable || 'data') : null;
+        let allRows = [];
+
+        /** 处理一批源行：映射 → 写入目标 */
+        async function consume(rawRows) {
+            if (!rawRows.length) return;
+            stats.read += rawRows.length;
+            const rows = applyMappingList(rawRows, mapping, options);
+
+            if (targetKind === 'file') {
+                if (format === 'xlsx') allRows = allRows.concat(rows);
+                else writer.write(rows);
+                stats.written += rows.length;
+                return;
+            }
+
+            for (let i = 0; i < rows.length; i += batchSize) {
+                const slice = rows.slice(i, i + batchSize);
+                try {
+                    const batch = buildBatch(targetDb.type, targetTable, targetColumns, slice,
+                        options.mode || 'insert', options.keyColumns || [], options.emptyAsNull !== false);
+                    if (targetDb.type === 'oracle') {
+                        // 数组绑定一次网络往返；batchErrors：单行失败不拖垮整批，逐行回报原因
+                        // eslint-disable-next-line no-await-in-loop
+                        const r = await targetSession.executeMany(batch.sql, batch.bindRows);
+                        stats.written += r.rowsAffected;
+                        stats.batches++;
+                        if (r.batchErrors.length) {
+                            stats.failed += r.batchErrors.length;
+                            const head = r.batchErrors.slice(0, 3)
+                                .map(e => `批内第 ${e.offset + 1} 行：${e.message}`).join('；');
+                            errors.push({
+                                batch: stats.batches, rows: r.batchErrors.length,
+                                message: head + (r.batchErrors.length > 3 ? `（本批共 ${r.batchErrors.length} 行失败）` : '')
+                            });
+                            if (options.stopOnError !== false) return;
+                        }
+                    } else {
+                        // eslint-disable-next-line no-await-in-loop
+                        const res = await targetSession.query(batch.sql, batch.params);
+                        stats.written += res.affectedRows || slice.length;
+                        stats.batches++;
+                    }
+                } catch (err) {
+                    errors.push({ batch: stats.batches + 1, rows: slice.length, message: err.message });
+                    stats.failed += slice.length;
+                    if (options.stopOnError !== false) return;
+                }
+            }
+        }
+
+        if (source.kind === 'db') {
+            for (let offset = 0; offset < limit; offset += READ_BATCH) {
+                const size = Math.min(READ_BATCH, limit - offset);
+                // eslint-disable-next-line no-await-in-loop
+                const res = stripRowNum(await sourceSession.query(paginate(source.db.type, source.baseSql, offset, size)));
+                const rows = res.rows || [];
+                // eslint-disable-next-line no-await-in-loop
+                await consume(rows);
+                report({
+                    phase: 'running', read: stats.read, written: stats.written,
+                    batches: stats.batches, message: `已读取 ${stats.read} 行`
+                });
+                if (rows.length < size) break;
+                if (errors.length && options.stopOnError !== false) break;
+            }
+        } else {
+            const rows = source.rows || [];
+            const capped = rows.slice(0, limit);
+            for (let i = 0; i < capped.length; i += READ_BATCH) {
+                // eslint-disable-next-line no-await-in-loop
+                await consume(capped.slice(i, i + READ_BATCH));
+                report({
+                    phase: 'running', read: stats.read, written: stats.written,
+                    batches: stats.batches, message: `已处理 ${stats.read} 行`
+                });
+                if (errors.length && options.stopOnError !== false) break;
+            }
+        }
+
+        if (targetKind === 'file') {
+            saved = writer.save(allRows);
+            if (saved.error) return { ok: false, message: saved.error };
+            stats.batches = Math.ceil(stats.read / READ_BATCH);
+        }
+    } finally {
+        if (sourceSession) await sourceSession.close();
+        if (targetSession) await targetSession.close();
     }
 
     const durationMs = Date.now() - started;
@@ -1122,15 +1156,13 @@ function applyMappingList(rows, mapping, options) {
 function writeBatchSize(targetDb, options, columnCount = 1) {
     const base = !targetDb ? WRITE_BATCH_MYSQL
         : targetDb.type === 'oracle' ? WRITE_BATCH_ORACLE : WRITE_BATCH_MYSQL;
-    let size = Math.min(Math.max(Number(options.batchSize) || base, 1), base);
+    // base 只是「留空默认值」；用户自定义允许到 MAX_WRITE_BATCH，不再被静默压回默认值
+    let size = Math.min(Math.max(Number(options.batchSize) || base, 1), MAX_WRITE_BATCH);
     // PostgreSQL 单语句占位符上限 65535：按列数收缩批大小
     if (targetDb && targetDb.type === 'postgres') {
         size = Math.min(size, Math.max(1, Math.floor(60000 / Math.max(1, columnCount))));
     }
-    // Oracle 单语句绑定变量上限 32767：同样按列数收缩
-    if (targetDb && targetDb.type === 'oracle') {
-        size = Math.min(size, Math.max(1, Math.floor(30000 / Math.max(1, columnCount))));
-    }
+    // Oracle 走 executeMany 数组绑定，无单语句绑定上限，不必按列数收缩
     return size;
 }
 
@@ -1207,5 +1239,5 @@ module.exports = {
     parseDelimited, parseJson, parseSqlInserts, parseContent, detectDelimiter, inferType,
     transformValue, applyMapping, validateMapping, normalizeDate, decodeTextFile,
     typeCompat, typeWarningsFor, classOfDbType,
-    csvEscape, sqlLiteral, insertStatement, paginate, stripRowNum, buildBatch
+    csvEscape, sqlLiteral, insertStatement, paginate, stripRowNum, buildBatch, writeBatchSize
 };
