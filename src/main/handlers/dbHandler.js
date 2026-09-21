@@ -270,10 +270,11 @@ function setup(ipcMain) {
        详见 main/etl.js。写类通道为管理员专属（见 auth.ADMIN_ONLY）。
     */
 
-    /** 源端采样：列清单（含推断类型）+ 样例行 + 总量 */
+    /** 源端采样：列清单（含推断类型）+ 样例行 + 总量；附带目标表结构供映射匹配 */
     ipcMain.handle('db:etl:preview', (e, { source, target } = {}) =>
         etl.previewSource(source || {}).then(res => {
-            if (!res.ok || !target) return res;
+            if (!target) return res;
+            // 源读取失败也尽量带回目标结构：选表后自动加载不应依赖源就绪
             return etl.describeTarget(target).then(desc => ({
                 ...res,
                 targetTable: desc.table || null,

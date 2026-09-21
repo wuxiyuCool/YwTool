@@ -371,8 +371,19 @@ function goStep(step) {
     });
     el.prev.disabled = next === 1;
     el.next.disabled = next === 4;
-    if (next === 3) paintMapping();
+    if (next === 3) {
+        // 兜底：目标表已选但结构未加载（如自动选中不触发 change）→ 先读结构再重匹配
+        if (state.target.kind === 'db' && state.target.sourceId && state.target.table && !state.targetColumns.length) {
+            readTarget();
+        } else if (state.targetColumns.length && !state.mapping.filter(m => m.to).length) {
+            autoMap(false);
+        }
+        paintMapping();
+    }
     if (next === 4) paintPlanSummary();
+    // 首次自动加载失败/未触发时，进入对应步骤补拉一次
+    if (next === 1 && el.srcSource.value && !el.srcTable.options.length) loadTables('source');
+    if (next === 2 && el.tgtSource.value && !el.tgtTable.options.length) loadTables('target');
 }
 
 function footStatus(text) {
@@ -410,6 +421,10 @@ async function loadTables(which) {
     if (!sourceId) {
         selectEl.innerHTML = '<option value="">请选择数据源</option>';
         return;
+    }
+    // 数据源自动选中时不会触发 change，进入页面即给占位并拉取（大库清单需数秒）
+    if (!selectEl.options.length || selectEl.options[0].value !== '') {
+        selectEl.innerHTML = '<option value="">表清单加载中…</option>';
     }
     try {
         const res = await api.sql.tables(sourceId);
@@ -529,7 +544,8 @@ async function readSource() {
         paintSourcePreview();
         // 首次读取源后自动生成映射
         if (!state.mapping.length) autoMap(false);
-        el.srcStatus.textContent = `已读取 ${res.total === null || res.total === undefined ? '未知' : res.total} 行 · ${res.columns.length} 列`;
+        el.srcStatus.textContent = `已读取 ${res.total === null || res.total === undefined ? '未知' : res.total} 行 · ${res.columns.length} 列`
+            + (res.encoding && res.encoding !== 'utf-8' ? ` · 已按 ${String(res.encoding).toUpperCase()} 解码` : '');
         footStatus(`源：${res.columns.length} 列 / ${res.total === null || res.total === undefined ? '未知' : res.total} 行`);
         toast('源数据已就绪', 'success');
     } catch (err) {
@@ -547,11 +563,12 @@ async function readTarget() {
     el.tgtStatus.textContent = '正在读取表结构...';
     try {
         const res = await api.etl.preview(sourcePayload(), targetPayload());
-        if (!res || !res.ok) {
+        const tgtCols = res && Array.isArray(res.targetColumns) ? res.targetColumns : [];
+        if ((!res || !res.ok) && !tgtCols.length) {
             el.tgtStatus.textContent = (res && res.message) || '读取失败';
             return;
         }
-        if (Array.isArray(res.targetColumns)) state.targetColumns = res.targetColumns;
+        if (tgtCols.length) state.targetColumns = tgtCols;
         const cols = state.targetColumns || [];
         el.tgtPreview.innerHTML = cols.length
             ? `<div class="etl-col-chips" style="margin-top:10px">${cols.map(c =>
@@ -1032,6 +1049,9 @@ export async function mount(root) {
 
     await loadSources();
     paintKindVisibility();
+    // 下拉默认选中首个数据源不会触发 change：主动拉一次表清单，否则选表永远空白
+    if (el.srcSource.value) loadTables('source');
+    if (el.tgtSource.value) loadTables('target');
 
     /* 步骤导航 */
     el.steps.forEach(node => node.addEventListener('click', () => {
@@ -1066,7 +1086,12 @@ export async function mount(root) {
     /* 目标配置 */
     el.tgtKind.addEventListener('change', () => { paintKindVisibility(); });
     el.tgtSource.addEventListener('change', () => { state.target.sourceId = el.tgtSource.value; loadTables('target'); });
-    el.tgtTable.addEventListener('change', () => { state.target.table = el.tgtTable.value; state.targetColumns = []; });
+    el.tgtTable.addEventListener('change', () => {
+        state.target.table = el.tgtTable.value;
+        state.targetColumns = [];
+        // 选定目标表即自动读取表结构并刷新映射匹配，无需再手动点「读取目标结构」
+        if (el.tgtTable.value && el.tgtKind.value === 'db') readTarget();
+    });
     el.tgtMode.addEventListener('change', () => { el.modeHint.textContent = MODE_HINT[el.tgtMode.value] || ''; });
     el.pickSave.addEventListener('click', async () => {
         const res = await api.etl.pickFile('save');

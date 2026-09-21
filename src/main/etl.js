@@ -369,6 +369,45 @@ function parseContent(text, format, options = {}) {
     return parseDelimited(text, { hasHeader: options.hasHeader !== false, delimiter: options.delimiter });
 }
 
+/** 无 BOM 的 UTF-16LE 特征：ASCII 字符高位 0x00 落在奇数字节 */
+function looksLikeUtf16Le(buf) {
+    const n = Math.min(buf.length - (buf.length % 2), 4096);
+    if (n < 16) return false;
+    let evenNull = 0;
+    let oddNull = 0;
+    for (let i = 0; i < n; i++) {
+        if (buf[i] === 0) { if (i % 2) oddNull++; else evenNull++; }
+    }
+    return oddNull / n > 0.15 && evenNull < oddNull / 4;
+}
+
+/** 文本文件解码：BOM 优先（UTF-16/UTF-8），其次严格 UTF-8，再 UTF-16LE 特征，最后回退 GB18030（兼容 GBK/GB2312） */
+function decodeTextFile(buf) {
+    if (buf.length >= 2 && buf[0] === 0xFF && buf[1] === 0xFE) {
+        return { text: new TextDecoder('utf-16le').decode(buf.subarray(2)), encoding: 'utf-16le' };
+    }
+    if (buf.length >= 2 && buf[0] === 0xFE && buf[1] === 0xFF) {
+        return { text: new TextDecoder('utf-16be').decode(buf.subarray(2)), encoding: 'utf-16be' };
+    }
+    let encoding = 'utf-8';
+    let text;
+    try {
+        text = new TextDecoder('utf-8', { fatal: true }).decode(buf);
+        // 纯 ASCII 的 UTF-16LE 恰能通过 UTF-8 解码但每两字节一个 NUL，识别后重解
+        if (text.indexOf('\u0000') >= 0 && looksLikeUtf16Le(buf)) {
+            return { text: new TextDecoder('utf-16le').decode(buf), encoding: 'utf-16le' };
+        }
+    } catch (e) {
+        if (looksLikeUtf16Le(buf)) {
+            return { text: new TextDecoder('utf-16le').decode(buf), encoding: 'utf-16le' };
+        }
+        encoding = 'gb18030';
+        text = new TextDecoder('gb18030').decode(buf);
+    }
+    if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+    return { text, encoding };
+}
+
 /** 读取文件内容（带大小校验） */
 function readFileContent(filePath, format, options = {}) {
     const stat = fs.statSync(filePath);
@@ -381,9 +420,9 @@ function readFileContent(filePath, format, options = {}) {
         const parsed = parseContent(fs.readFileSync(filePath), formatName, options);
         return parsed.error ? { error: parsed.error } : { ...parsed, format: formatName };
     }
-    const text = fs.readFileSync(filePath, 'utf8');
+    const { text, encoding } = decodeTextFile(fs.readFileSync(filePath));
     const parsed = parseContent(text, formatName, options);
-    return parsed.error ? { error: parsed.error } : { ...parsed, format: formatName };
+    return parsed.error ? { error: parsed.error } : { ...parsed, format: formatName, encoding };
 }
 
 function inferType(values) {
@@ -610,8 +649,21 @@ function buildBatch(sourceType, table, columns, rows, mode, keyColumns, emptyAsN
         if (mode === 'upsert') throw new Error('Oracle 的 UPSERT 需要 MERGE 语句，当前版本未开放，请使用「追加」模式');
         if (mode === 'replace') throw new Error('Oracle 不支持 REPLACE INTO，请使用「追加」模式');
         let idx = 0;
-        const placeholders = rows.map(() => `(${columns.map(() => `:${++idx}`).join(',')})`).join(',');
-        return { sql: `INSERT INTO ${table} (${columns.join(',')}) VALUES ${placeholders}`, params };
+        const one = () => columns.map(() => `:${++idx}`).join(',');
+        // 字符串日期直绑 DATE 列会 ORA-01861（依 NLS 格式），统一转成 Date 由驱动绑定
+        const oraParams = params.map(v => {
+            if (typeof v === 'string' && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}(:\d{2})?$/.test(v)) {
+                const d = new Date(v.replace(' ', 'T'));
+                return Number.isNaN(d.getTime()) ? v : d;
+            }
+            return v;
+        });
+        // Oracle 不支持多行 VALUES（ORA-00933）：单行直插，多行走 INSERT ALL ... SELECT FROM DUAL
+        if (rows.length === 1) {
+            return { sql: `INSERT INTO ${table} (${columns.join(',')}) VALUES (${one()})`, params: oraParams };
+        }
+        const all = rows.map(() => `INTO ${table} (${columns.join(',')}) VALUES (${one()})`).join(' ');
+        return { sql: `INSERT ALL ${all} SELECT 1 FROM DUAL`, params: oraParams };
     }
 
     if (sourceType === 'postgres') {
@@ -769,7 +821,7 @@ async function prepareSource(source = {}) {
             return { error: `源文件读取失败：${err.message}` };
         }
         if (parsed.error) return { error: parsed.error };
-        return { kind: 'file', columns: parsed.columns, rows: parsed.rows, warnings: parsed.warnings || [], filePath, suggestedTable: parsed.table };
+        return { kind: 'file', columns: parsed.columns, rows: parsed.rows, warnings: parsed.warnings || [], filePath, suggestedTable: parsed.table, encoding: parsed.encoding };
     }
 
     // text：直接解析剪贴的文本
@@ -814,6 +866,7 @@ async function previewSource(source = {}) {
         sample: rows.slice(0, SAMPLE_ROWS),
         total: rows.length,
         warnings: prepared.warnings || [],
+        encoding: prepared.encoding || null,
         suggestedTable: prepared.suggestedTable || null
     };
 }
@@ -1074,6 +1127,10 @@ function writeBatchSize(targetDb, options, columnCount = 1) {
     if (targetDb && targetDb.type === 'postgres') {
         size = Math.min(size, Math.max(1, Math.floor(60000 / Math.max(1, columnCount))));
     }
+    // Oracle 单语句绑定变量上限 32767：同样按列数收缩
+    if (targetDb && targetDb.type === 'oracle') {
+        size = Math.min(size, Math.max(1, Math.floor(30000 / Math.max(1, columnCount))));
+    }
     return size;
 }
 
@@ -1148,7 +1205,7 @@ module.exports = {
     listTasks, listRuns, saveTask, deleteTask, pickFile,
     // 解析与转换（供自检使用）
     parseDelimited, parseJson, parseSqlInserts, parseContent, detectDelimiter, inferType,
-    transformValue, applyMapping, validateMapping, normalizeDate,
+    transformValue, applyMapping, validateMapping, normalizeDate, decodeTextFile,
     typeCompat, typeWarningsFor, classOfDbType,
     csvEscape, sqlLiteral, insertStatement, paginate, stripRowNum, buildBatch
 };

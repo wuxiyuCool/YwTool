@@ -151,7 +151,12 @@ async function query(source, sql, params = []) {
             connectString: `${source.host}:${source.port || 1521}/${source.database}`
         });
         try {
-            const result = await conn.execute(sql, params, { outFormat: oracledb.OUT_FORMAT_OBJECT });
+            // Oracle 默认不自动提交，且本函数每次调用即开即关连接：DML 必须 autoCommit，否则 close 时回滚（表现为「写入成功但无数据」）
+            const isDml = /^\s*(insert|update|delete|merge)\b/i.test(sql);
+            const result = await conn.execute(sql, params, {
+                outFormat: oracledb.OUT_FORMAT_OBJECT,
+                autoCommit: isDml
+            });
             const rows = Array.isArray(result.rows) ? result.rows : [];
             return {
                 columns: result.metaData ? result.metaData.map(m => m.name) : [],
@@ -200,8 +205,9 @@ async function listTables(source) {
         return r.rows.map(row => ({ name: pick(row, 'name'), comment: pick(row, 'comment') || '' }));
     }
     if (source.type === 'oracle') {
+        // comment 是 Oracle 保留字，别名必须加引号（否则 ORA-00923）
         const r = await query(source,
-            `SELECT t.table_name AS name, c.comments AS comment
+            `SELECT t.table_name AS name, c.comments AS "comment"
              FROM user_tables t LEFT JOIN user_tab_comments c ON c.table_name = t.table_name
              ORDER BY t.table_name`);
         return r.rows.map(row => ({ name: pick(row, 'name'), comment: pick(row, 'comment') || '' }));
@@ -227,7 +233,7 @@ async function describeTable(source, table) {
     if (source.type === 'mysql') {
         const r = await query(source,
             `SELECT column_name AS name, column_type AS type, is_nullable AS nullable,
-                    column_key AS key, column_default AS default, extra
+                    column_key AS \`key\`, column_default AS \`default\`, extra
              FROM information_schema.columns
              WHERE table_schema = ? AND table_name = ?
              ORDER BY ordinal_position`, [source.database || null, assertName(table)]);
@@ -244,8 +250,8 @@ async function describeTable(source, table) {
     if (source.type === 'postgres') {
         const r = await query(source,
             `SELECT c.column_name AS name, c.data_type AS type, c.is_nullable AS nullable,
-                    CASE WHEN kcu.column_name IS NOT NULL THEN 'PRI' ELSE '' END AS key,
-                    c.column_default AS default, '' AS extra
+                    CASE WHEN kcu.column_name IS NOT NULL THEN 'PRI' ELSE '' END AS "key",
+                    c.column_default AS "default", '' AS extra
              FROM information_schema.columns c
              LEFT JOIN information_schema.table_constraints tc
                     ON tc.table_schema = c.table_schema AND tc.table_name = c.table_name AND tc.constraint_type = 'PRIMARY KEY'
@@ -318,15 +324,16 @@ async function listObjects(source, category) {
     }
 
     if (type === 'oracle') {
+        // comment 是 Oracle 保留字，别名统一加引号
         const SQLS = {
-            views: `SELECT view_name AS name, '' AS comment FROM user_views ORDER BY view_name`,
-            procedures: `SELECT object_name AS name, object_type AS comment FROM user_objects
+            views: `SELECT view_name AS name, '' AS "comment" FROM user_views ORDER BY view_name`,
+            procedures: `SELECT object_name AS name, object_type AS "comment" FROM user_objects
                           WHERE object_type IN ('PROCEDURE','FUNCTION') ORDER BY object_name`,
-            packages: `SELECT object_name AS name, status AS comment FROM user_objects WHERE object_type = 'PACKAGE' ORDER BY object_name`,
-            sequences: `SELECT sequence_name AS name, 'MIN ' || min_value || ' MAX ' || max_value || ' + ' || increment_by AS comment
+            packages: `SELECT object_name AS name, status AS "comment" FROM user_objects WHERE object_type = 'PACKAGE' ORDER BY object_name`,
+            sequences: `SELECT sequence_name AS name, 'MIN ' || min_value || ' MAX ' || max_value || ' + ' || increment_by AS "comment"
                          FROM user_sequences ORDER BY sequence_name`,
-            triggers: `SELECT trigger_name AS name, table_name AS comment FROM user_triggers ORDER BY trigger_name`,
-            jobs: `SELECT job_name AS name, enabled AS comment FROM user_scheduler_jobs ORDER BY job_name`
+            triggers: `SELECT trigger_name AS name, table_name AS "comment" FROM user_triggers ORDER BY trigger_name`,
+            jobs: `SELECT job_name AS name, enabled AS "comment" FROM user_scheduler_jobs ORDER BY job_name`
         };
         if (!SQLS[category]) throw new Error(`暂不支持的对象分类：${type} · ${category}`);
         const r = await query(source, SQLS[category]);
