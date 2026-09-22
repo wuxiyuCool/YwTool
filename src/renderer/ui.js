@@ -25,6 +25,43 @@ export function toast(message, type = 'info') {
     }, 2600);
 }
 
+/** 通用文本输入弹窗（替代 window.prompt——Electron 不支持，调用恒返回 undefined）
+ *  resolve(去空白后的输入)；取消/ESC 返回 null */
+export function promptText(title, value = '', placeholder = '') {
+    return new Promise(resolve => {
+        const mask = document.createElement('div');
+        mask.className = 'modal-mask open';
+        mask.innerHTML = `<div class="modal" style="width:420px">
+            <div class="modal-header"><h3>${esc(title)}</h3><button class="modal-close" data-close>×</button></div>
+            <div class="modal-body">
+                <div class="form-item"><input class="input" placeholder="${esc(placeholder)}"></div>
+            </div>
+            <div class="modal-footer">
+                <span class="spacer"></span>
+                <button class="btn btn-ghost" data-close>取消</button>
+                <button class="btn btn-primary" data-ok>确定</button>
+            </div>
+        </div>`;
+        const input = mask.querySelector('input');
+        input.value = value;
+        const onKey = e => { if (e.key === 'Escape') finish(null); };
+        function finish(result) {
+            document.removeEventListener('keydown', onKey);
+            mask.remove();
+            resolve(result);
+        }
+        mask.addEventListener('click', e => {
+            if (e.target === mask || e.target.closest('[data-close]')) return finish(null);
+            if (e.target.closest('[data-ok]')) return finish(input.value.trim());
+        });
+        input.addEventListener('keydown', e => { if (e.key === 'Enter') finish(input.value.trim()); });
+        document.addEventListener('keydown', onKey);
+        document.body.appendChild(mask);
+        input.focus();
+        input.select();
+    });
+}
+
 /** 演示模式横幅（浏览器中直接打开时使用，Electron 内不显示） */
 export function demoBanner(isDemo) {
     if (!isDemo) return '';

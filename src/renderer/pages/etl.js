@@ -11,7 +11,7 @@
  * 数据源清单自行拉取（api.dbConfig.list），不再依赖 SQL 工作台注入。
  */
 import { api, demoMode } from '../api.js';
-import { esc, toast, demoBanner, guardAdmin, applyReadonly } from '../ui.js';
+import { esc, toast, demoBanner, guardAdmin, applyReadonly, promptText } from '../ui.js';
 
 const TRANSFORMS = [
     { value: 'none', label: '直接写入' },
@@ -971,7 +971,7 @@ async function saveTask() {
     syncSourceFromDom();
     syncTargetFromDom();
     collectMapping();
-    const name = prompt('任务名称', state.taskName || '未命名同步任务');
+    const name = await promptText('任务名称', state.taskName || '未命名同步任务');
     if (!name) return;
     const task = buildTask();
     task.name = name;

@@ -9,7 +9,7 @@
  *   - 执行历史：tasks:list / tasks:detail / tasks:export
  */
 import { api, demoMode } from '../api.js';
-import { esc, toast, demoBanner, emptyRow, loadingRow, shortTime, guardWrite, guardAdmin, applyReadonly } from '../ui.js';
+import { esc, toast, demoBanner, emptyRow, loadingRow, shortTime, guardWrite, guardAdmin, applyReadonly, promptText } from '../ui.js';
 
 let hosts = [];
 let scripts = [];
@@ -598,10 +598,11 @@ export async function mount(root) {
             if (c) { inputEl.value = c.cmd; inputEl.focus(); }
         }
     });
-    root.querySelector('#wt-quick-add').addEventListener('click', () => {
-        const cmd = (inputEl.value || '').trim() || prompt('输入要保存为快捷命令的内容：');
+    root.querySelector('#wt-quick-add').addEventListener('click', async () => {
+        let cmd = (inputEl.value || '').trim();
+        if (!cmd) cmd = (await promptText('输入要保存为快捷命令的内容：')) || '';
         if (!cmd) return;
-        const label = prompt('命令别名（显示在按钮上）：', cmd.slice(0, 12)) || cmd.slice(0, 12);
+        const label = (await promptText('命令别名（显示在按钮上）：', cmd.slice(0, 12))) || cmd.slice(0, 12);
         quickCmds.push({ label, cmd });
         saveQuickCmds();
         refreshQuick();

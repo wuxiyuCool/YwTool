@@ -8,7 +8,7 @@
  * 边界说明：HTTPS 走 CONNECT 隧道直通（仅记录域名与流量），不做 MITM 解密。
  */
 import { api, demoMode } from '../api.js';
-import { esc, toast, demoBanner, emptyRow, guardAdmin, applyReadonly } from '../ui.js';
+import { esc, toast, demoBanner, emptyRow, guardAdmin, applyReadonly, promptText } from '../ui.js';
 
 const METHODS = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS'];
 const TABS = [
@@ -247,7 +247,7 @@ async function saveCase() {
     let req;
     try { req = collectRequest(); } catch (err) { toast(err.message, 'warn'); return; }
     if (!req.url) { toast('请输入 URL', 'warn'); return; }
-    const name = prompt('案例名称', `${req.method} ${req.url.slice(0, 40)}`);
+    const name = await promptText('案例名称', `${req.method} ${req.url.slice(0, 40)}`);
     if (!name) return;
     const res = await api.netsec.cases.save({ name, ...req, headers: JSON.stringify(req.headers || {}, null, 2) });
     toast(res && res.ok ? '案例已保存' : ((res && res.message) || '保存失败'), res && res.ok ? 'success' : 'danger');
