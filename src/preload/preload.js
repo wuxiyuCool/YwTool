@@ -95,6 +95,7 @@ const validChannels = [
     'ai:script:generate', 'ai:script:optimize',
     'ai:model:get', 'ai:model:save',
     'ai:agent:get', 'ai:agent:save', 'ai:agent:toggle', 'ai:agent:tools',
+    'ai:approval:reply',
     'ai:roles:list', 'ai:roles:save', 'ai:roles:delete', 'ai:role:save'
 ];
 
@@ -108,7 +109,7 @@ contextBridge.exposeInMainWorld('electron', {
 
     /** 主进程主动推送（任务执行进度、告警、菜单导航、AI 流式回复） */
     on: (channel, callback) => {
-        const pushChannels = ['task:progress', 'alert:new', 'schedule:progress', 'menu:navigate', 'ai:stream', 'ai:step', 'data:progress', 'netsec:packet', 'netsec:breakpoint', 'terminal:data', 'terminal:exit'];
+        const pushChannels = ['task:progress', 'alert:new', 'schedule:progress', 'menu:navigate', 'ai:stream', 'ai:step', 'data:progress', 'netsec:packet', 'netsec:breakpoint', 'terminal:data', 'terminal:exit', 'ai:approval'];
         if (!pushChannels.includes(channel)) return () => {};
         const listener = (event, payload) => callback(payload);
         ipcRenderer.on(channel, listener);

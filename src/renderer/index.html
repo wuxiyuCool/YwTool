@@ -90,6 +90,10 @@
                                 <span class="track"></span>
                             </label>
                         </div>
+                        <div class="ai-bar-item ai-bar-scope">
+                            <span class="ai-bar-label">目标</span>
+                            <button class="btn btn-ghost btn-sm" id="ai-scope-btn" title="圈定 Agent 可操作的主机 / 数据源 / 终端会话（不圈定则不限制）">未圈定</button>
+                        </div>
                     </div>
                     <div class="ai-context" id="ai-context" style="display:none">
                         <span class="ai-context-label">上下文</span>
@@ -108,6 +112,14 @@
                         </div>
                         <div class="ai-sessions-list" id="ai-sessions-list"></div>
                     </div>
+                    <div class="ai-scope-pop" id="ai-scope-pop">
+                        <div class="ai-scope-head">
+                            <strong>操作目标圈定</strong>
+                            <button class="btn-link" id="ai-scope-clear">清空选择</button>
+                        </div>
+                        <div class="ai-scope-hint">仅 Agent 模式生效：圈定后 AI 只能对勾选的主机 / 数据源 / 终端会话执行操作；全部不勾选表示不限制。</div>
+                        <div class="ai-scope-list" id="ai-scope-list"></div>
+                    </div>
                     <div class="ai-chat" id="ai-chat"><div class="ai-empty">加载中...</div></div>
                     <div class="ai-quick" id="ai-quick"></div>
                     <div class="ai-input-bar">
@@ -122,6 +134,23 @@
 
     <!-- 登录覆盖层（未登录时由 session.js 渲染内容） -->
     <div class="login-screen" id="login-screen" style="display:none"></div>
+
+    <!-- Agent 高危执行审批弹窗（aiPanel 订阅 ai:approval 推送后展示） -->
+    <div class="ai-approval-mask" id="ai-approval-mask" style="display:none">
+        <div class="ai-approval-box">
+            <div class="ai-approval-title">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                <strong>Agent 请求执行高危操作</strong>
+            </div>
+            <div class="ai-approval-tool" id="ai-approval-tool"></div>
+            <pre class="ai-approval-args" id="ai-approval-args"></pre>
+            <div class="ai-approval-tip">同意后该操作将真实执行并写入审计日志；120 秒未处理将自动拒绝。</div>
+            <div class="ai-approval-actions">
+                <button class="btn btn-ghost" id="ai-approval-deny">拒绝</button>
+                <button class="btn btn-danger" id="ai-approval-allow">同意执行</button>
+            </div>
+        </div>
+    </div>
 
     <script type="module" src="./router.js"></script>
 </body>
