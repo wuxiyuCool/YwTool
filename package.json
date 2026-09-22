@@ -23,17 +23,16 @@
     "axios": "^1.7.9",
     "base-64": "^1.0.0",
     "canvas": "^3.0.1",
-    "electron": "^33.3.1",
-    "jimp": "^1.6.0",
-    "jsqr": "^1.4.0",
-    "qrcode": "^1.5.4",
-    "utf8": "^3.0.0"
+    "electron": "^33.3.1"
   },
   "dependencies": {
     "electron-squirrel-startup": "^1.0.1",
+    "jimp": "^1.6.0",
+    "jsqr": "^1.4.0",
     "mysql2": "^3.24.4",
     "oracledb": "^7.0.1",
     "pg": "^8.23.0",
+    "qrcode": "^1.5.4",
     "ssh2": "^1.17.0"
   }
 }
