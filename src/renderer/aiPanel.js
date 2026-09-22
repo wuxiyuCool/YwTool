@@ -33,6 +33,12 @@ let roleSelEl = null;       // 提示词角色下拉
 let currentRole = '';
 let agentSwitchEl = null;   // Agent 开关
 let agentWrapEl = null;
+let scopeBtnEl = null;      // 「操作目标」圈定按钮
+let scopePopEl = null;
+let scopeListEl = null;
+let approvalMaskEl = null;  // 高危执行审批弹窗
+let approvalToolEl = null;
+let approvalArgsEl = null;
 let resizerEl = null;
 
 let visible = false;      // ai 模块对当前账号是否可见
@@ -50,8 +56,13 @@ let context = null;       // { pageId, pageLabel, domainLabel }
 let target = null;        // { kind:'script', name, type, desc, content }
 let unsubStream = null;
 let unsubStep = null;
+let unsubApproval = null;
 let agentSupported = false;  // 管理员是否开启了 Agent 总开关
 let agentEnabled = false;    // 当前用户本次是否启用 Agent
+let agentScope = { hostIds: [], dbIds: [], sessionIds: [] };  // 操作目标圈定（空数组 = 该类别不限制）
+let scopeData = null;        // 圈定弹层数据缓存 { hosts, dbs, terms }
+const approvalQueue = [];    // 待审批请求队列（主进程串行等待，一般同时只有 1 个）
+let approvalCurrent = null;
 
 /* ---------------- Markdown 渲染 ---------------- */
 
@@ -302,7 +313,7 @@ async function send() {
         outbound.push(...history, { role: 'user', content: text });
 
         // 流式：delta 由 onAiStream 回填；完整文本在返回值中；Agent 轨迹由 onAiStep 推送
-        const res = await api.ai.chat(outbound, agentEnabled, currentRole);
+        const res = await api.ai.chat(outbound, agentEnabled, currentRole, agentEnabled ? buildScopePayload() : null);
         if (res && res.ok) {
             messages = messages.concat([{ role: 'assistant', content: res.text }]);
             if (streamingEl) finalizeStreaming(res.text);
@@ -324,6 +335,7 @@ async function send() {
             appendMessage('assistant', tip);
         }
     } finally {
+        cancelPendingApprovals();
         sending = false;
         sendBtn.disabled = false;
         sendBtn.textContent = '发送';
@@ -657,6 +669,139 @@ async function toggleAgent(enabled) {
     paintAgent();
 }
 
+/* ---------------- 操作目标圈定（Agent 白名单） ----------------
+   按类别勾选：某类别勾选后 Agent 对该类工具只能操作勾选项；未勾选的类别不限制。
+   随每次 agent 模式的 chat 请求以 scope 传给主进程（checkScope 强制拦截）。
+*/
+
+function scopeCount() {
+    return agentScope.hostIds.length + agentScope.dbIds.length + agentScope.sessionIds.length;
+}
+
+function buildScopePayload() {
+    const out = {};
+    if (agentScope.hostIds.length) out.hostIds = agentScope.hostIds.slice();
+    if (agentScope.dbIds.length) out.dbIds = agentScope.dbIds.slice();
+    if (agentScope.sessionIds.length) out.sessionIds = agentScope.sessionIds.slice();
+    return Object.keys(out).length ? out : null;
+}
+
+function paintScope() {
+    if (!scopeBtnEl) return;
+    const total = scopeCount();
+    scopeBtnEl.textContent = total
+        ? `已圈定 ${agentScope.hostIds.length ? `主机${agentScope.hostIds.length} ` : ''}${agentScope.dbIds.length ? `库${agentScope.dbIds.length} ` : ''}${agentScope.sessionIds.length ? `终端${agentScope.sessionIds.length}` : ''}`.trim()
+        : '未圈定';
+    scopeBtnEl.classList.toggle('has-scope', total > 0);
+    if (scopePopEl) {
+        scopePopEl.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+            const kind = cb.dataset.kind;
+            cb.checked = !!kind && agentScope[kind].includes(cb.dataset.id);
+        });
+    }
+}
+
+function hideScopePop() {
+    if (scopePopEl) scopePopEl.classList.remove('open');
+}
+
+async function loadScopeData() {
+    if (scopeData) return scopeData;
+    const [hosts, dbs, terms] = await Promise.all([
+        api.hosts.list().catch(() => []),
+        api.dbConfig.list().catch(() => []),
+        api.terminal.list().catch(() => ({ ok: true, sessions: [] }))
+    ]);
+    scopeData = {
+        hosts: Array.isArray(hosts) ? hosts : [],
+        dbs: Array.isArray(dbs) ? dbs : [],
+        // 终端会话主键是 sessionId（agentExec 用它定位），统一映射到 id 供勾选
+        terms: ((terms && Array.isArray(terms.sessions)) ? terms.sessions : []).map(s => ({ ...s, id: s.sessionId }))
+    };
+    return scopeData;
+}
+
+function scopeGroup(title, kind, items, nameOf, subOf, emptyTip) {
+    const rows = items.length
+        ? items.map(it => `<label class="ai-scope-item">
+                <input type="checkbox" data-kind="${kind}" data-id="${esc(String(it.id))}">
+                <span class="ai-scope-name">${esc(nameOf(it))}</span>
+                <span class="ai-scope-sub">${esc(subOf(it) || '')}</span>
+            </label>`).join('')
+        : `<div class="ai-scope-empty">${esc(emptyTip)}</div>`;
+    return `<div class="ai-scope-group">
+        <div class="ai-scope-group-head">${esc(title)}<span>${items.length}</span></div>
+        ${rows}
+    </div>`;
+}
+
+async function toggleScopePop(forceOpen) {
+    if (!scopePopEl) return;
+    const open = forceOpen !== undefined ? forceOpen : !scopePopEl.classList.contains('open');
+    if (!open) { scopePopEl.classList.remove('open'); return; }
+    hideSessionsPop();
+    scopeListEl.innerHTML = '<div class="ai-empty">加载中…</div>';
+    scopePopEl.classList.add('open');
+    scopeData = null;   // 终端会话等清单会随时变化，每次打开都重新拉取
+    const d = await loadScopeData();
+    const prune = (list, items) => list.filter(id => items.some(it => String(it.id) === id));
+    agentScope.hostIds = prune(agentScope.hostIds, d.hosts);
+    agentScope.dbIds = prune(agentScope.dbIds, d.dbs);
+    agentScope.sessionIds = prune(agentScope.sessionIds, d.terms);
+    scopeListEl.innerHTML =
+        scopeGroup('主机（SSH）', 'hostIds', d.hosts, h => h.name, h => h.ip, '暂无纳管主机') +
+        scopeGroup('数据源（数据库）', 'dbIds', d.dbs, s => s.name, s => s.dbType || s.type || '', '暂无数据源') +
+        scopeGroup('终端会话（已打开）', 'sessionIds', d.terms, s => s.hostName, s => `${Math.round((s.idleMs || 0) / 1000)}s 前活跃`, '暂无终端会话，可在「任务执行」工作台打开');
+    paintScope();
+}
+
+/* ---------------- 高危执行审批 ----------------
+   主进程 ai:chat 期间推送 ai:approval（工具带 needsApproval）；
+   弹窗排队展示，用户点同意/拒绝后回传 ai:approval:reply；超时由主进程自动拒绝。
+*/
+
+function renderApproval() {
+    if (!approvalMaskEl) return;
+    if (!approvalCurrent) { approvalMaskEl.style.display = 'none'; return; }
+    approvalMaskEl.style.display = 'flex';
+    const info = approvalCurrent;
+    approvalToolEl.innerHTML = `<strong>${esc(info.label || info.name)}</strong><span class="ai-approval-name mono">${esc(info.name)}</span>`;
+    let argsText = '';
+    try { argsText = JSON.stringify(info.args || {}, null, 2); } catch (e) { argsText = String(info.args || ''); }
+    approvalArgsEl.textContent = argsText.length > 1200 ? argsText.slice(0, 1200) + '\n…（已截断）' : argsText;
+}
+
+function pushApproval(info) {
+    if (!info || !info.requestId) return;
+    approvalQueue.push(info);
+    if (!approvalCurrent) {
+        approvalCurrent = approvalQueue.shift();
+        renderApproval();
+    }
+}
+
+async function answerApproval(approved) {
+    const info = approvalCurrent;
+    if (!info) return;
+    approvalCurrent = null;
+    renderApproval();
+    try { await api.ai.approvalReply(info.requestId, approved); } catch (e) { /* 主进程已超时处理 */ }
+    toast(approved ? `已同意执行：${info.label || info.name}` : `已拒绝：${info.label || info.name}`, approved ? 'success' : 'warn');
+    if (approvalQueue.length) {
+        approvalCurrent = approvalQueue.shift();
+        renderApproval();
+    }
+}
+
+/** 对话结束/失败时清理残留审批（主进程侧已 resolve 时回传无害） */
+function cancelPendingApprovals() {
+    const leftovers = approvalCurrent ? [approvalCurrent, ...approvalQueue] : approvalQueue.slice();
+    approvalQueue.length = 0;
+    approvalCurrent = null;
+    renderApproval();
+    leftovers.forEach(info => { api.ai.approvalReply(info.requestId, false).catch(() => { }); });
+}
+
 function bindEvents() {
     sendBtn.addEventListener('click', send);
     if (modelSelEl) modelSelEl.addEventListener('change', () => switchModel(modelSelEl.value));
@@ -708,12 +853,47 @@ function bindEvents() {
         if (item) switchSession(item.dataset.id);
     });
 
-    // 点击面板其他区域收起会话弹层
+    // 点击面板其他区域收起会话/目标弹层
     panel.addEventListener('click', e => {
-        if (!sessionsPopEl.classList.contains('open')) return;
-        if (e.target.closest('#ai-sessions-pop') || e.target.closest('#ai-sessions')) return;
-        hideSessionsPop();
+        if (sessionsPopEl.classList.contains('open') && !e.target.closest('#ai-sessions-pop') && !e.target.closest('#ai-sessions')) {
+            hideSessionsPop();
+        }
+        if (scopePopEl && scopePopEl.classList.contains('open') && !e.target.closest('#ai-scope-pop') && !e.target.closest('#ai-scope-btn')) {
+            hideScopePop();
+        }
     });
+
+    // 操作目标圈定
+    if (scopeBtnEl) {
+        scopeBtnEl.addEventListener('click', e => {
+            e.stopPropagation();
+            toggleScopePop();
+        });
+    }
+    if (scopePopEl) {
+        scopePopEl.querySelector('#ai-scope-clear').addEventListener('click', () => {
+            agentScope = { hostIds: [], dbIds: [], sessionIds: [] };
+            paintScope();
+            toast('已清空操作目标圈定（不限制）', 'info');
+        });
+    }
+    if (scopeListEl) {
+        scopeListEl.addEventListener('change', e => {
+            const cb = e.target.closest('input[type="checkbox"]');
+            if (!cb || !cb.dataset.kind) return;
+            const list = agentScope[cb.dataset.kind];
+            const i = list.indexOf(cb.dataset.id);
+            if (cb.checked && i < 0) list.push(cb.dataset.id);
+            if (!cb.checked && i >= 0) list.splice(i, 1);
+            paintScope();
+        });
+    }
+
+    // 高危执行审批
+    if (approvalMaskEl) {
+        approvalMaskEl.querySelector('#ai-approval-allow').addEventListener('click', () => answerApproval(true));
+        approvalMaskEl.querySelector('#ai-approval-deny').addEventListener('click', () => answerApproval(false));
+    }
 
     // 对话区：代码块复制 / 消息级操作（保存为脚本、复制、保存表单）
     chatEl.addEventListener('click', e => {
@@ -751,6 +931,10 @@ function bindEvents() {
     // Agent 工具执行轨迹订阅
     if (typeof api.onAiStep === 'function' && !unsubStep) {
         unsubStep = api.onAiStep(payload => { if (payload) renderStep(payload); });
+    }
+    // Agent 高危执行审批订阅
+    if (typeof api.onAiApproval === 'function' && !unsubApproval) {
+        unsubApproval = api.onAiApproval(payload => { if (payload) pushApproval(payload); });
     }
 
     bindResizer();
@@ -844,12 +1028,19 @@ export function init() {
     roleSelEl = panel.querySelector('#ai-role-select');
     agentSwitchEl = panel.querySelector('#ai-agent-switch');
     agentWrapEl = panel.querySelector('#ai-agent-wrap');
+    scopeBtnEl = panel.querySelector('#ai-scope-btn');
+    scopePopEl = panel.querySelector('#ai-scope-pop');
+    scopeListEl = panel.querySelector('#ai-scope-list');
+    approvalMaskEl = document.getElementById('ai-approval-mask');
+    approvalToolEl = document.getElementById('ai-approval-tool');
+    approvalArgsEl = document.getElementById('ai-approval-args');
     resizerEl = panel.querySelector('#ai-resizer');
 
     bindEvents();
     paintQuick();
     paintContext();
     paintAgent();
+    paintScope();
     loadModels();
     loadRoles();
     loadAgent();

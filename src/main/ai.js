@@ -79,6 +79,7 @@ const AGENT_DEFAULTS = {
     allowLocalExec: false,   // run_local_command（高危，默认关）
     allowRemoteExec: false,  // run_host_command（SSH 远程执行，高危，默认关）
     allowSqlExecute: false,  // execute_sql / describe_table（数据源侧，默认关）
+    execApproval: true,      // 高危执行前弹窗审批：默认开启，用户逐次同意才执行
     commandTimeout: 15,      // 本机命令超时（秒）
     maxRows: 200             // 单工具数据行数上限
 };
@@ -100,9 +101,33 @@ const AGENT_PROMPT = `你现在具备工具调用（Agent）能力，按以下�
 2. 生成测试数据用 generate_data；产出可复用脚本用 save_script 落库，不要只在回复里贴代码。
 3. 调用工具前先用一句话说明要做什么；工具失败时换思路重试，最多重试一轮。
 4. 涉及删除、覆写、关停等高危动作，先给出方案让用户确认，不要直接执行。
-5. 最终回复要说明「调用了哪些工具 + 得到什么结论」，保持简洁。`;
+5. 远程执行类工具（run_host_command / run_batch_command / terminal_run）会触发用户审批弹窗，被拒绝时不要反复重试。
+6. 排障优先复用用户已打开的终端会话：list_terminals 查看，terminal_run 在该 shell 执行（延续其目录/环境）；无合适会话再用 run_host_command 新建连接。
+7. 若用户圈定了「操作目标」范围，只能对范围内的主机/数据源/会话操作，范围外会被拒绝。
+8. 最终回复要说明「调用了哪些工具 + 得到什么结论」，保持简洁。`;
 
 const providerById = id => PROVIDERS.find(p => p.id === id) || null;
+
+/** 把用户圈定的操作目标 id 解析成名称，追加到 Agent 系统提示，让模型知道可用范围 */
+function describeScope(scope) {
+    if (!scope || typeof scope !== 'object') return '';
+    const hosts = (scope.hostIds || []).map(id => {
+        const h = store.find('hosts', id); return h ? `${h.name}(${h.ip},id=${id})` : `id=${id}`;
+    });
+    const dbs = (scope.dbIds || []).map(id => {
+        const s = store.find('dbSources', id); return s ? `${s.name}[${s.type}],id=${id}` : `id=${id}`;
+    });
+    const terms = (scope.sessionIds || []).map(id => {
+        const t = (require('./handlers/terminalHandler').listSessions().find(s => s.sessionId === id));
+        return t ? `${t.hostName},sessionId=${id}` : `sessionId=${id}`;
+    });
+    const lines = [];
+    if (hosts.length) lines.push(`主机：${hosts.join('、')}`);
+    if (dbs.length) lines.push(`数据源：${dbs.join('、')}`);
+    if (terms.length) lines.push(`终端会话：${terms.join('、')}`);
+    if (!lines.length) return '';
+    return `\n\n【本次操作范围（用户圈定，范围外目标会被拒绝）】\n${lines.join('\n')}`;
+}
 
 /* ------------------------------------------------------------------
  * 提示词角色（db.aiRoles）
@@ -227,7 +252,7 @@ function getAgentConfig() {
 /** Agent 全局配置保存（仅接受已知键，布尔/数值做类型收敛） */
 function saveAgentConfig(payload = {}) {
     const prev = getAgentConfig();
-    const boolKeys = ['enabled', 'allowDataGenerate', 'allowSaveScript', 'allowLocalExec', 'allowRemoteExec', 'allowSqlExecute'];
+    const boolKeys = ['enabled', 'allowDataGenerate', 'allowSaveScript', 'allowLocalExec', 'allowRemoteExec', 'allowSqlExecute', 'execApproval'];
     const limits = {
         maxSteps: [1, 12],
         commandTimeout: [1, 120],
@@ -431,21 +456,21 @@ async function emitText(text, onDelta) {
  * @returns {Promise<{text:string, steps:Array}>}
  */
 async function chatAgent(messages, options = {}) {
-    const { onDelta, onStep, user } = options;
+    const { onDelta, onStep, user, scope, approve } = options;
     const cfg = getConfig();
     assertUsable(cfg, messages);
 
     const agentCfg = options.agent && typeof options.agent === 'object' ? options.agent : {};
     const maxSteps = agentCfg.maxSteps || 6;
     const model = options.model || cfg.model;
-    const ctx = { user, agent: { ...agentCfg, enabled: true } };
+    const ctx = { user, agent: { ...agentCfg, enabled: true }, scope: scope || null, approve: approve || null };
 
     const allowed = agentTools.toolCatalog()
         .filter(t => !t.gate || agentCfg[t.gate])
         .map(t => t.name);
     const tools = allowed.length ? agentTools.toolSchemas(allowed) : null;
 
-    const convo = [{ role: 'system', content: `${options.system || SYSTEM_PROMPT}\n\n${AGENT_PROMPT}` }].concat(messages.slice(-16));
+    const convo = [{ role: 'system', content: `${options.system || SYSTEM_PROMPT}\n\n${AGENT_PROMPT}${describeScope(scope)}` }].concat(messages.slice(-16));
     const steps = [];
     let text = '';
 

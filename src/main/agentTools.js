@@ -309,6 +309,7 @@ const TOOLS = {
         desc: '在已配置的数据源上执行只读 SQL（仅 SELECT / SHOW / DESC / EXPLAIN），返回前若干行结果',
         risk: '高危',
         gate: 'allowSqlExecute',
+        scopeKind: 'db', scopeArg: 'sourceId',
         schema: {
             type: 'object',
             properties: {
@@ -377,6 +378,7 @@ const TOOLS = {
         desc: '查询数据源中某张表的列结构（名称/类型/可空/主键/默认值），只读元数据',
         risk: '低危',
         gate: 'allowSqlExecute',
+        scopeKind: 'db', scopeArg: 'sourceId',
         schema: {
             type: 'object',
             properties: {
@@ -429,6 +431,7 @@ const TOOLS = {
         desc: '在平台纳管的某台主机（SSH）上执行一条命令并返回输出；受敏感词黑白名单约束，建议先用 list_hosts 获取 hostId',
         risk: '高危',
         gate: 'allowRemoteExec',
+        scopeKind: 'host', scopeArg: 'hostId', needsApproval: true,
         schema: {
             type: 'object',
             properties: {
@@ -474,6 +477,7 @@ const TOOLS = {
         desc: '在多台主机（SSH）上并发执行同一条命令并返回逐台结果；受敏感词黑白名单约束，建议先用 list_hosts 获取 hostId 列表；单条命令失败不影响其它主机',
         risk: '高危',
         gate: 'allowRemoteExec',
+        scopeKind: 'host', scopeArg: 'hostIds', needsApproval: true,
         schema: {
             type: 'object',
             properties: {
@@ -510,6 +514,50 @@ const TOOLS = {
                 result: okCount === targets.length ? 'success' : 'failed'
             });
             return { ok: okCount === targets.length, total: targets.length, success: okCount, results: summary };
+        }
+    },
+
+    /** 终端会话清单：配合 terminal_run（在用户已打开的 shell 上排障） */
+    list_terminals: {
+        name: 'list_terminals',
+        label: '查询终端会话',
+        desc: '列出用户当前在终端工作台打开的交互式 SSH 会话（sessionId / 主机名 / 空闲时长），供 terminal_run 指定目标',
+        risk: '只读',
+        gate: null,
+        schema: { type: 'object', properties: {} },
+        async run() {
+            const sessions = require('./handlers/terminalHandler').listSessions();
+            return { ok: true, count: sessions.length, sessions };
+        }
+    },
+
+    /** 在指定终端会话执行命令：与用户共享同一 shell（cwd/环境变量延续），适合排障 */
+    terminal_run: {
+        name: 'terminal_run',
+        label: '终端会话执行命令',
+        desc: '在用户已打开的某个终端会话（交互式 SSH shell）中执行一条单行命令并回传输出；先用 list_terminals 获取 sessionId。与新建连接不同，这里延续用户当前 shell 的目录与环境，适合顺着用户排障上下文继续操作',
+        risk: '高危',
+        gate: 'allowRemoteExec',
+        scopeKind: 'terminal', scopeArg: 'sessionId', needsApproval: true,
+        schema: {
+            type: 'object',
+            properties: {
+                sessionId: { type: 'string', description: '终端会话 id（list_terminals 可查）' },
+                command: { type: 'string', description: '待执行的单行命令' },
+                timeoutSec: { type: 'number', description: '等待输出上限（秒），默认 20' }
+            },
+            required: ['sessionId', 'command']
+        },
+        async run(args = {}, ctx = {}) {
+            const terminal = require('./handlers/terminalHandler');
+            const timeout = Math.min(Math.max(Number(args.timeoutSec) || 20, 5), 60) * 1000;
+            const res = await terminal.agentExec(String(args.sessionId || ''), String(args.command || '').trim(), timeout);
+            audit.write({
+                type: '命令', user: ctx.user || '-', source: 'AI Agent',
+                detail: `AI Agent 在终端会话（${res.hostName || args.sessionId}）执行：${String(args.command).slice(0, 200)}`,
+                result: res.ok ? 'success' : 'failed'
+            });
+            return res;
         }
     },
 
@@ -562,7 +610,8 @@ const toolSchemas = (allowedTools = null) => Object.values(TOOLS)
 
 /** 工具元信息（供「AI 配置」页展示能力清单） */
 const toolCatalog = () => Object.values(TOOLS).map(t => ({
-    name: t.name, label: t.label, desc: t.desc, risk: t.risk, gate: t.gate
+    name: t.name, label: t.label, desc: t.desc, risk: t.risk, gate: t.gate,
+    scopeKind: t.scopeKind || null, needsApproval: !!t.needsApproval
 }));
 
 /**
@@ -584,6 +633,21 @@ async function runTool(name, args = {}, ctx = {}) {
         return { ok: false, error: 'Agent 总开关已关闭，无法调用任何工具' };
     }
 
+    // 目标圈定：用户在 AI 面板勾选了操作范围时，工具目标必须落在范围内
+    if (tool.scopeKind) {
+        const scopeErr = checkScope(tool, args, ctx);
+        if (scopeErr) return { ok: false, error: scopeErr };
+    }
+
+    // 执行审批：开关开启时，高危执行前请求用户确认（拒绝/超时不执行）
+    if (tool.needsApproval && ctx.agent && ctx.agent.execApproval !== false && typeof ctx.approve === 'function') {
+        const approved = await ctx.approve({ name: tool.name, label: tool.label, args });
+        if (!approved) {
+            audit.write({ type: '拦截', user: ctx.user || '-', result: 'blocked', detail: `用户拒绝了 AI Agent 执行「${tool.label}」` });
+            return { ok: false, denied: true, error: '用户拒绝了本次执行（可在对话中说明原因或换一种方式）' };
+        }
+    }
+
     try {
         const result = await tool.run(args, ctx);
         if (result && typeof result === 'object' && 'content' in result) return { ...result, content: clamp(result.content) };
@@ -591,6 +655,27 @@ async function runTool(name, args = {}, ctx = {}) {
     } catch (err) {
         return { ok: false, error: `工具执行异常：${err.message}` };
     }
+}
+
+const SCOPE_KEY = { host: 'hostIds', db: 'dbIds', terminal: 'sessionIds' };
+const SCOPE_LABEL = { host: '主机', db: '数据源', terminal: '终端会话' };
+
+/** 返回错误文案（null=放行）。scope 缺失=未启用圈定；某类清单存在但为空 → 拒绝并提示圈定 */
+function checkScope(tool, args = {}, ctx = {}) {
+    const scope = ctx.scope;
+    if (!scope) return null;
+    const list = scope[SCOPE_KEY[tool.scopeKind]];
+    if (!Array.isArray(list)) return null;
+    if (!list.length) {
+        return `当前未圈定任何${SCOPE_LABEL[tool.scopeKind]}目标：请提示用户在 AI 面板「操作目标」中勾选${SCOPE_LABEL[tool.scopeKind]}后再继续`;
+    }
+    const raw = args[tool.scopeArg];
+    const targets = Array.isArray(raw) ? raw : [raw];
+    const bad = targets.filter(x => !list.includes(String(x)));
+    if (bad.length) {
+        return `目标 [${bad.join(', ')}] 不在用户圈定的${SCOPE_LABEL[tool.scopeKind]}范围内；只允许：[${list.join(', ')}]`;
+    }
+    return null;
 }
 
 module.exports = { TOOLS, toolSchemas, toolCatalog, runTool };
