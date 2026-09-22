@@ -401,6 +401,7 @@ export const api = {
         resize: (sessionId, cols, rows) => invoke('terminal:resize', { sessionId, cols, rows }),
         close: sessionId => invoke('terminal:close', { sessionId }),
         list: () => invoke('terminal:list'),
+        runScript: (sessionId, scriptId) => invoke('terminal:runScript', { sessionId, scriptId }),
         onData: callback => {
             if (demoMode || typeof bridge.on !== 'function') return () => {};
             return bridge.on('terminal:data', callback);

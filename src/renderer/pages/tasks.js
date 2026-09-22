@@ -23,6 +23,8 @@ let editingScheduleId = null;
 const termSessions = new Map();
 let activeSession = null;
 let termUnsubs = [];
+/** document 级收起监听（重复 mount 时先摘旧的） */
+let docCloseHandler = null;
 let quickCmds = loadQuickCmds();
 
 const statusMap = {
@@ -203,14 +205,23 @@ export function render() {
                         <div>未打开会话</div>
                         <span class="muted" style="font-size:12px">支持多会话并行；行模式交互，ANSI 彩色输出</span>
                     </div>
+                    <!-- 脚本选择浮层 -->
+                    <div class="wt-script-pop" id="wt-script-pop" style="display:none">
+                        <div class="wt-script-pop-head">
+                            <span>执行托管脚本</span>
+                            <input class="input" id="wt-script-search" placeholder="搜索脚本名 / 说明" style="height:26px;font-size:12px">
+                        </div>
+                        <div class="wt-script-list" id="wt-script-list"></div>
+                    </div>
                 </div>
                 <div class="wt-quick-bar">
                     <div class="wt-quick-chips" id="wt-quick-chips">${quickCmdHtml()}</div>
+                    <button class="btn btn-ghost btn-sm" id="wt-script-btn" title="从脚本库选择并发送到当前会话">脚本库</button>
                     <button class="btn btn-ghost btn-sm" id="wt-quick-add">+ 添加</button>
                 </div>
                 <div class="wt-input-row">
                     <span class="wt-prompt">$</span>
-                    <input class="input mono wt-input" id="wt-input" placeholder="输入命令后回车发送（需先连接主机）" autocomplete="off" spellcheck="false">
+                    <textarea class="input mono wt-input" id="wt-input" rows="1" placeholder="输入命令后回车发送（Shift+回车换行；需先连接主机）" autocomplete="off" spellcheck="false"></textarea>
                     <button class="btn btn-primary btn-sm" id="wt-send" data-write>发送</button>
                 </div>
             </section>
@@ -244,6 +255,7 @@ export function render() {
                 <div class="form-item" id="field-script" style="display:none">
                     <label>选择脚本</label>
                     <select class="select" id="script-select" style="width:100%"></select>
+                    <div class="wt-script-preview mono" id="script-preview" style="display:none"></div>
                 </div>
                 <div class="form-item">
                     <label>并发数（默认取系统配置）</label>
@@ -348,6 +360,7 @@ export async function mount(root) {
     // router 复用不回调 unmount：每次挂载先清理上一轮的推送订阅与会话，避免监听器泄漏
     termUnsubs.forEach(off => { try { off && off(); } catch (e) { /* ignore */ } });
     termUnsubs = [];
+    if (docCloseHandler) document.removeEventListener('click', docCloseHandler);
     termSessions.clear();
     activeSession = null;
 
@@ -495,20 +508,85 @@ export async function mount(root) {
         const tab = e.target.closest('[data-sid]');
         if (tab) showSession(tab.dataset.sid);
     });
-    root.querySelector('#wt-send').addEventListener('click', () => {
+    const doSend = () => {
         const v = inputEl.value;
-        if (!v) return;
+        if (!v) { sendInput('\n'); return; }
         sendInput(v + '\n');
         inputEl.value = '';
-    });
+        autoGrow();
+    };
+    const autoGrow = () => {
+        inputEl.style.height = 'auto';
+        inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px';
+    };
+    root.querySelector('#wt-send').addEventListener('click', doSend);
+    inputEl.addEventListener('input', autoGrow);
     inputEl.addEventListener('keydown', e => {
-        if (e.key === 'Enter') {
-            const v = inputEl.value;
-            if (!v) { sendInput('\n'); return; }
-            sendInput(v + '\n');
-            inputEl.value = '';
-        }
+        if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doSend(); }
     });
+
+    /* ---------------- 脚本库浮层 ---------------- */
+    const scriptPopEl = root.querySelector('#wt-script-pop');
+    const scriptListEl = root.querySelector('#wt-script-list');
+    const scriptSearchEl = root.querySelector('#wt-script-search');
+    const TYPE_BADGE = { shell: 'blue', python: 'purple', compose: 'gray' };
+
+    const paintScriptPop = () => {
+        const kw = scriptSearchEl.value.trim().toLowerCase();
+        const list = scripts.filter(s => !kw || `${s.name} ${s.desc || ''}`.toLowerCase().includes(kw));
+        scriptListEl.innerHTML = list.length ? list.map(s => `
+            <div class="wt-script-item" data-sid="${esc(s.id)}">
+                <div class="wt-script-main">
+                    <div class="wt-script-name">${esc(s.name)} <span class="badge ${TYPE_BADGE[s.type] || 'gray'}" style="font-size:10px;padding:0 5px">${esc(s.type)}</span>
+                        ${s.version ? `<span class="muted" style="font-size:11px">${esc(s.version)}</span>` : ''}</div>
+                    <div class="wt-script-desc muted">${esc(s.desc || '')}</div>
+                </div>
+                <div class="wt-script-ops">
+                    <button class="btn-link" data-sact="run" data-write title="发送到当前终端会话执行">▶ 执行</button>
+                    <button class="btn-link" data-sact="fill" title="填入输入行编辑后发送">填入</button>
+                </div>
+            </div>`).join('') : '<div class="empty" style="padding:16px">无匹配脚本</div>';
+    };
+    const toggleScriptPop = (show) => {
+        scriptPopEl.style.display = show ? '' : 'none';
+        if (show) { paintScriptPop(); scriptSearchEl.focus(); }
+    };
+    root.querySelector('#wt-script-btn').addEventListener('click', e => {
+        e.stopPropagation();
+        toggleScriptPop(scriptPopEl.style.display === 'none');
+    });
+    scriptSearchEl.addEventListener('input', paintScriptPop);
+    scriptSearchEl.addEventListener('click', e => e.stopPropagation());
+    scriptListEl.addEventListener('click', async e => {
+        e.stopPropagation();
+        const btn = e.target.closest('[data-sact]');
+        const item = e.target.closest('[data-sid]');
+        if (!btn || !item) return;
+        const script = scripts.find(s => s.id === item.dataset.sid);
+        if (!script) return;
+        if (btn.dataset.sact === 'fill') {
+            inputEl.value = script.content || '';
+            autoGrow();
+            inputEl.focus();
+            toggleScriptPop(false);
+            return;
+        }
+        // ▶ 执行：发送到当前活跃会话（主进程包装 heredoc，交互模式不退出 shell）
+        if (!activeSession || !termSessions.has(activeSession)) { toast('请先从左侧连接一台主机', 'warn'); return; }
+        if (!guardWrite('终端执行脚本')) return;
+        const res = await api.terminal.runScript(activeSession, script.id);
+        if (res && res.ok) {
+            toast(`脚本「${res.name}」已发送到 ${termSessions.get(activeSession).hostName}`, 'success');
+            toggleScriptPop(false);
+        } else toast((res && res.message) || '发送失败', 'danger');
+    });
+    // 点击其它区域收起浮层（模块级引用，mount 时先摘旧的防重复注册）
+    docCloseHandler = e => {
+        if (scriptPopEl.style.display !== 'none' && !scriptPopEl.contains(e.target) && e.target.id !== 'wt-script-btn') {
+            toggleScriptPop(false);
+        }
+    };
+    document.addEventListener('click', docCloseHandler);
 
     // 快捷命令：点击发送，右键删除，「+ 添加」保存当前输入
     root.querySelector('#wt-quick-chips').addEventListener('click', e => {
@@ -628,7 +706,18 @@ export async function mount(root) {
         const isScript = modeSel.value === 'script';
         root.querySelector('#field-script').style.display = isScript ? '' : 'none';
         root.querySelector('#field-cmd').style.display = isScript ? 'none' : '';
+        paintScriptPreview();
     });
+
+    // 选择脚本 → 内容预览，批量执行前所见即所得
+    const paintScriptPreview = () => {
+        const box = root.querySelector('#script-preview');
+        const script = scripts.find(s => s.id === root.querySelector('#script-select').value);
+        if (!script || modeSel.value !== 'script') { box.style.display = 'none'; return; }
+        box.style.display = '';
+        box.innerHTML = `<div class="wt-script-preview-head">${esc(script.name)} · ${esc(script.type)} ${esc(script.version || '')} · ${esc(script.desc || '')}</div><pre>${esc(script.content || '')}</pre>`;
+    };
+    root.querySelector('#script-select').addEventListener('change', paintScriptPreview);
 
     const currentPayload = () => ({
         cmd: root.querySelector('#cmd-input').value,

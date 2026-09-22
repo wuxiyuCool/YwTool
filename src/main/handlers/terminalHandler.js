@@ -20,6 +20,7 @@ const { BrowserWindow } = require('electron');
 const store = require('../store');
 const audit = require('../auditLogger');
 const ssh = require('../ssh');
+const scriptUtil = require('../scriptUtil');
 
 const IDLE_TIMEOUT_MS = 30 * 60 * 1000;   // 30 分钟无活动自动断开
 const MAX_SESSIONS = 16;                   // 并发会话上限，防资源耗尽
@@ -133,6 +134,31 @@ function setup(ipcMain) {
         touch(s);
         try { s.stream.setWindow(rows, cols, 0, 0); return { ok: true }; }
         catch (err) { return { ok: false, message: err.message }; }
+    });
+
+    /** 在活跃终端会话中执行托管脚本：包装逻辑留在主进程（scriptUtil），渲染层只传 id；交互式包装不追加 exit */
+    ipcMain.handle('terminal:runScript', (e, { sessionId, scriptId } = {}) => {
+        const s = sessions.get(sessionId);
+        if (!s || s.closed) return { ok: false, message: '会话不存在或已结束' };
+        const script = store.find('scripts', scriptId);
+        if (!script) return { ok: false, message: '脚本不存在（可能已被删除）' };
+        let cmd;
+        try {
+            cmd = scriptUtil.buildScriptCommand(script, { interactive: true });
+        } catch (err) {
+            return { ok: false, message: err.message };
+        }
+        touch(s);
+        try {
+            s.stream.write(cmd + '\n', 'utf8');
+        } catch (err) {
+            return { ok: false, message: '发送失败：' + err.message };
+        }
+        audit.write({
+            type: '命令', user: operator(),
+            detail: `终端会话执行托管脚本「${script.name}」（${script.type} ${script.version || ''}）→ ${s.hostName}`
+        });
+        return { ok: true, name: script.name };
     });
 
     ipcMain.handle('terminal:close', (e, { sessionId } = {}) => {

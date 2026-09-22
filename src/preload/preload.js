@@ -36,7 +36,7 @@ const validChannels = [
     'tasks:list', 'tasks:detail', 'tasks:validate', 'tasks:run', 'tasks:export',
 
     // 交互式终端（Xshell 式工作台）
-    'terminal:open', 'terminal:input', 'terminal:resize', 'terminal:close', 'terminal:list',
+    'terminal:open', 'terminal:input', 'terminal:resize', 'terminal:close', 'terminal:list', 'terminal:runScript',
 
     // 脚本管理
     'scripts:list', 'scripts:detail', 'scripts:save', 'scripts:delete',
