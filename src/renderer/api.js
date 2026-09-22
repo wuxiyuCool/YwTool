@@ -93,6 +93,8 @@ function demoFallback(channel, data) {
         case 'accounts:list': return demo.demoAccounts;
         case 'tasks:list': return demo.demoTasks;
         case 'tasks:detail': return demo.demoTasks.find(t => t.id === data) || null;
+        case 'terminal:list': return { ok: true, sessions: [] };
+        case 'terminal:open': return { ok: false, message: '演示模式无法建立真实 SSH 终端会话，请在应用内（npm start）使用' };
         case 'audit:query': return { ok: true, records: queryDemoLogs(data) };
         case 'audit:stats':
             return { todayTotal: 7, todayBlocked: 1, todayFailed: 2, files: 3 };
@@ -390,6 +392,23 @@ export const api = {
         validate: payload => invoke('tasks:validate', payload),
         run: payload => invoke('tasks:run', payload),
         exportCsv: id => invoke('tasks:export', id)
+    },
+
+    /** 交互式终端（Xshell 式工作台）：open 建会话，input/resize/close 交互，onData/onExit 推送 */
+    terminal: {
+        open: payload => invoke('terminal:open', payload),
+        input: (sessionId, data) => invoke('terminal:input', { sessionId, data }),
+        resize: (sessionId, cols, rows) => invoke('terminal:resize', { sessionId, cols, rows }),
+        close: sessionId => invoke('terminal:close', { sessionId }),
+        list: () => invoke('terminal:list'),
+        onData: callback => {
+            if (demoMode || typeof bridge.on !== 'function') return () => {};
+            return bridge.on('terminal:data', callback);
+        },
+        onExit: callback => {
+            if (demoMode || typeof bridge.on !== 'function') return () => {};
+            return bridge.on('terminal:exit', callback);
+        }
     },
 
     scripts: {

@@ -188,16 +188,23 @@ export async function mount(root) {
         }
     });
 
-    // 刷新状态：逐台连接测试（顺序执行，避免瞬时并发过高）
+    // 刷新状态：并发连接测试（限 6 路，结果逐个回填行），比逐台串行快数倍
     root.querySelector('#btn-refresh').addEventListener('click', async (e) => {
         const btn = e.currentTarget;
         btn.disabled = true;
         btn.textContent = '探测中...';
-        for (const host of [...hosts]) {
-            const res = await api.hosts.test(host.id);
-            const row = tbody.querySelector(`tr[data-id="${host.id}"] .status-cell`);
-            if (row && res && res.host) row.innerHTML = statusBadge(res.host.status);
-        }
+        const queue = [...hosts];
+        const worker = async () => {
+            while (queue.length) {
+                const host = queue.shift();
+                const cell = tbody.querySelector(`tr[data-id="${host.id}"] .status-cell`);
+                if (cell) cell.innerHTML = '<span class="badge gray">探测中</span>';
+                const res = await api.hosts.test(host.id);
+                const row = tbody.querySelector(`tr[data-id="${host.id}"] .status-cell`);
+                if (row && res && res.host) row.innerHTML = statusBadge(res.host.status);
+            }
+        };
+        await Promise.all(Array.from({ length: Math.min(6, hosts.length) }, worker));
         await refresh();
         btn.disabled = false;
         btn.textContent = '刷新状态';

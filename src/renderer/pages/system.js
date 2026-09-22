@@ -2,7 +2,7 @@
  * 系统运维 · 系统设置
  * 数据流：system:env（数据文件/日志目录/驱动可用性）
  *        system:config:get|save（运行参数）
- * 用户与权限已拆至 users.js；备份与外置密钥已拆至 backup.js
+ * 用户与权限已拆至 users.js；备份与外置密钥已并入 ledger.js（凭据台账）
  */
 import { api, demoMode } from '../api.js';
 import { toast, demoBanner, applyReadonly, guardAdmin } from '../ui.js';

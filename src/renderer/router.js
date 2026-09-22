@@ -33,7 +33,6 @@ import * as accounts from './pages/accounts.js';
 import * as ledger from './pages/ledger.js';
 import * as system from './pages/system.js';
 import * as users from './pages/users.js';
-import * as backup from './pages/backup.js';
 import * as aiconfig from './pages/aiconfig.js';
 import * as aiPanel from './aiPanel.js';
 import { api } from './api.js';
@@ -57,7 +56,6 @@ const icons = {
     vault: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="12" cy="12" r="4"/><path d="M12 10v2l1.5 1.5"/></svg>',
     box: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8l-9-5-9 5 9 5 9-5z"/><path d="M3 8v8l9 5 9-5V8"/><path d="M12 13v8"/></svg>',
     users: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>',
-    backup: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8V4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6"/><polyline points="8 14 12 10 15 13 19 9"/><path d="M15 9h4v4"/></svg>',
     gear: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.08a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.08a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.08a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>'
 };
 
@@ -94,7 +92,6 @@ const pages = {
     audit: { label: '日志审计', sub: '操作与命令全量留痕 · 异常告警', domain: 'system', icon: icons.scroll, module: 'audit', mod: audit },
     aiconfig: { label: 'AI 配置', sub: '模型提供方 · 模型清单 · Agent 能力开关', domain: 'system', icon: icons.spark, module: 'ai', mod: aiconfig },
     users: { label: '用户与权限', sub: '账号角色 · 模块权限矩阵 · 用户覆写', domain: 'system', icon: icons.users, module: 'users', mod: users },
-    backup: { label: '备份与密钥', sub: '加密备份导入导出 · 外置密钥注入', domain: 'system', icon: icons.backup, module: 'backup', mod: backup },
     system: { label: '系统设置', sub: '运行参数 · 环境 · 依赖状态', domain: 'system', icon: icons.gear, module: 'settings', mod: system }
 };
 

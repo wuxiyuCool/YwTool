@@ -15,6 +15,7 @@ const IPC_MODULES = [
     './handlers/kubeHandler',
     './handlers/ruleHandler',
     './handlers/taskHandler',
+    './handlers/terminalHandler',
     './handlers/scriptHandler',
     './handlers/accountHandler',
     './handlers/ledgerHandler',
@@ -118,6 +119,7 @@ app.whenReady().then(() => {
 
 app.on('before-quit', () => {
     scheduler.stop();
+    require('./handlers/terminalHandler').closeAll();
 });
 
 app.on('window-all-closed', () => {

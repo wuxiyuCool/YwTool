@@ -19,6 +19,7 @@ const path = require('path');
 const { spawn } = require('child_process');
 const store = require('./store');
 const secrets = require('./secrets');
+const { FAST_ALGORITHMS } = require('./ssh');
 
 const API_VERSION = 'v1.41';
 const PIPE_WINDOWS = String.raw`\\.\pipe\docker_engine`;
@@ -52,7 +53,8 @@ function connectSsh(hostRec) {
             port: hostRec.port || 22,
             username: hostRec.user,
             readyTimeout: 15000,
-            keepaliveInterval: 10000
+            keepaliveInterval: 10000,
+            algorithms: FAST_ALGORITHMS
         };
         if (hostRec.authType === 'password') {
             options.password = secrets.resolve('host:' + hostRec.id, hostRec.password);

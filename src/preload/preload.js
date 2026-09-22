@@ -35,6 +35,9 @@ const validChannels = [
     // 任务执行
     'tasks:list', 'tasks:detail', 'tasks:validate', 'tasks:run', 'tasks:export',
 
+    // 交互式终端（Xshell 式工作台）
+    'terminal:open', 'terminal:input', 'terminal:resize', 'terminal:close', 'terminal:list',
+
     // 脚本管理
     'scripts:list', 'scripts:detail', 'scripts:save', 'scripts:delete',
     'scripts:run', 'scripts:lint', 'scripts:execOne',
@@ -105,7 +108,7 @@ contextBridge.exposeInMainWorld('electron', {
 
     /** 主进程主动推送（任务执行进度、告警、菜单导航、AI 流式回复） */
     on: (channel, callback) => {
-        const pushChannels = ['task:progress', 'alert:new', 'schedule:progress', 'menu:navigate', 'ai:stream', 'ai:step', 'data:progress', 'netsec:packet', 'netsec:breakpoint'];
+        const pushChannels = ['task:progress', 'alert:new', 'schedule:progress', 'menu:navigate', 'ai:stream', 'ai:step', 'data:progress', 'netsec:packet', 'netsec:breakpoint', 'terminal:data', 'terminal:exit'];
         if (!pushChannels.includes(channel)) return () => {};
         const listener = (event, payload) => callback(payload);
         ipcRenderer.on(channel, listener);

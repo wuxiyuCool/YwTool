@@ -467,6 +467,52 @@ const TOOLS = {
         }
     },
 
+    /** 批量执行：与「任务执行」页同链路（execBatch 并发 + 审计），供 AI Agent 操作工作台批量能力 */
+    run_batch_command: {
+        name: 'run_batch_command',
+        label: '批量执行命令',
+        desc: '在多台主机（SSH）上并发执行同一条命令并返回逐台结果；受敏感词黑白名单约束，建议先用 list_hosts 获取 hostId 列表；单条命令失败不影响其它主机',
+        risk: '高危',
+        gate: 'allowRemoteExec',
+        schema: {
+            type: 'object',
+            properties: {
+                hostIds: { type: 'array', items: { type: 'string' }, description: '目标主机 id 数组（list_hosts 可查）' },
+                command: { type: 'string', description: '待执行的 Shell 命令（单条，所有主机相同）' },
+                timeoutSec: { type: 'number', description: '每台主机超时（秒），默认取系统配置' }
+            },
+            required: ['hostIds', 'command']
+        },
+        async run(args = {}, ctx = {}) {
+            const ids = Array.isArray(args.hostIds) ? args.hostIds.map(String) : [];
+            if (!ids.length) return { ok: false, error: 'hostIds 为空，请先用 list_hosts 查询主机' };
+            const targets = store.list('hosts').filter(h => ids.includes(String(h.id)));
+            if (!targets.length) return { ok: false, error: '未匹配到任何主机（id 可能已失效）' };
+            const command = String(args.command || '').trim();
+            if (!command) return { ok: false, error: '命令为空' };
+            if (/[\r\n]/.test(command)) return { ok: false, error: '仅支持单行命令；多步操作请生成脚本走「任务执行」' };
+
+            const check = security.validate(command, { user: ctx.user, source: `AI Agent 批量 → ${targets.length} 台` });
+            if (!check.ok) {
+                audit.write({ type: '拦截', user: ctx.user || '-', detail: `AI Agent 批量命令被拦截（${targets.length} 台）：${command}`, result: 'blocked' });
+                return { ok: false, blocked: true, error: check.reason };
+            }
+            const timeout = Number(args.timeoutSec) || store.get('config').cmdTimeout || 30;
+            const results = await ssh.execBatch(targets, command, { timeout });
+            const summary = results.map(r => ({
+                host: r.hostName, ip: r.ip, status: r.status, exitCode: r.exitCode,
+                durationMs: r.durationMs, output: clamp(String(r.output || '')), error: r.error || undefined
+            }));
+            const okCount = summary.filter(r => r.status === 'success').length;
+            audit.write({
+                type: '命令', user: ctx.user || '-', source: 'AI Agent',
+                detail: `AI Agent 批量执行：${command.slice(0, 200)}（${targets.length} 台，成功 ${okCount}）`,
+                result: okCount === targets.length ? 'success' : 'failed'
+            });
+            return { ok: okCount === targets.length, total: targets.length, success: okCount, results: summary };
+        }
+    },
+
     /** 容器概览：只读，默认本机 Docker 端点，可传端点 id */
     list_containers: {
         name: 'list_containers',
