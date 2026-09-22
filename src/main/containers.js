@@ -18,7 +18,7 @@ const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
 const store = require('./store');
-const { decrypt } = require('./crypto');
+const secrets = require('./secrets');
 
 const API_VERSION = 'v1.41';
 const PIPE_WINDOWS = String.raw`\\.\pipe\docker_engine`;
@@ -55,10 +55,10 @@ function connectSsh(hostRec) {
             keepaliveInterval: 10000
         };
         if (hostRec.authType === 'password') {
-            options.password = decrypt(hostRec.password);
+            options.password = secrets.resolve('host:' + hostRec.id, hostRec.password);
         } else if (hostRec.keyPath && fs.existsSync(hostRec.keyPath)) {
             options.privateKey = fs.readFileSync(hostRec.keyPath);
-            if (hostRec.passphrase) options.passphrase = decrypt(hostRec.passphrase);
+            if (hostRec.passphrase) options.passphrase = secrets.resolve('host:' + hostRec.id + ':passphrase', hostRec.passphrase);
         } else {
             return reject(new Error(`主机「${hostRec.name}」没有可用的 SSH 凭据（请到主机管理配置密码或密钥）`));
         }
@@ -131,7 +131,7 @@ function transportOf(host) {
 }
 
 function authHeaders(host) {
-    const token = host.token ? decrypt(host.token) : '';
+    const token = host.token ? secrets.resolve('docker:' + host.id, host.token) : '';
     return token ? { Authorization: `Bearer ${token}` } : {};
 }
 

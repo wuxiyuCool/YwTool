@@ -15,6 +15,7 @@ const audit = require('../auditLogger');
 const auth = require('../auth');
 const perms = require('../permissions');
 const dbAdapters = require('../dbAdapters');
+const secrets = require('../secrets');
 const ssh = require('../ssh');
 const { hashPassword } = require('../crypto');
 
@@ -69,6 +70,22 @@ function setup(ipcMain) {
         }
         return { ok: true, config };
     });
+
+    /* ---------------- 外置密钥配置（配置外挂） ---------------- */
+
+    ipcMain.handle('system:secrets:status', () => secrets.status());
+
+    ipcMain.handle('system:secrets:template', () => {
+        const res = secrets.writeTemplate();
+        audit.write({
+            type: '操作', user: operator(), result: res.ok ? 'success' : 'failed',
+            detail: `生成外置密钥文件模板：${res.file}${res.created ? '（新建）' : '（已存在未覆盖）'}`
+        });
+        return res;
+    });
+
+    /** 明文 → v1: 本机密文：让用户的外置文件不必明文存密钥 */
+    ipcMain.handle('system:secrets:encrypt', (e, { plain } = {}) => secrets.encryptValue(plain));
 
     /* ---------------- 用户账号 ---------------- */
 

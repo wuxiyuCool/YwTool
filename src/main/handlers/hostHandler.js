@@ -6,6 +6,7 @@ const store = require('../store');
 const audit = require('../auditLogger');
 const alerts = require('../alerts');
 const ssh = require('../ssh');
+const secrets = require('../secrets');
 const { encrypt, mask } = require('../crypto');
 
 /** 对外输出时脱敏，绝不返回明文口令 */
@@ -20,15 +21,18 @@ function setup(ipcMain) {
     ipcMain.handle('hosts:save', (e, payload) => {
         const data = { ...payload };
         // 密码：留空表示不修改；有值则加密存储
+        let plainPwd = null;
         if (data.password === undefined || data.password === '' || data.password === mask()) {
             delete data.password;
         } else {
+            plainPwd = data.password;
             data.password = encrypt(data.password);
         }
         if (Array.isArray(data.tags) === false && typeof data.tags === 'string') {
             data.tags = data.tags.split(/[,，]/).map(s => s.trim()).filter(Boolean);
         }
         const saved = store.upsert('hosts', data);
+        if (plainPwd !== null) secrets.syncSet('host:' + saved.id, plainPwd);
         audit.write({
             type: '操作', user: store.get('config').currentUser,
             detail: `${payload.id ? '修改' : '添加'}主机 ${saved.name}（${saved.ip}:${saved.port}）`
@@ -39,6 +43,7 @@ function setup(ipcMain) {
     ipcMain.handle('hosts:delete', (e, id) => {
         const host = store.find('hosts', id);
         const ok = store.remove('hosts', id);
+        if (ok) secrets.syncRemove('host:' + id);
         if (ok && host) {
             audit.write({ type: '操作', user: store.get('config').currentUser, detail: `删除主机 ${host.name}（${host.ip}）` });
         }

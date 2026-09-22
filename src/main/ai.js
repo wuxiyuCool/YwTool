@@ -22,6 +22,7 @@
  */
 const store = require('./store');
 const { encrypt, decrypt, mask } = require('./crypto');
+const secrets = require('./secrets');
 const agentTools = require('./agentTools');
 
 /** 模型提供方注册表（每个提供方带预设模型，供下拉与配置页直接选用） */
@@ -162,25 +163,30 @@ function resolveSystem(roleId, username) {
 
 function getConfig() {
     const raw = store.get('aiConfig') || {};
-    const provider = providerById(raw.provider) || PROVIDERS[0];
+    const ext = secrets.aiOverride();       // 外置密钥文件优先注入（ai.apiKey 等）
+    const provider = providerById(ext.provider || raw.provider) || PROVIDERS[0];
+    const apiKey = ext.apiKey || decrypt(raw.apiKey);
     return {
         provider: provider.id,
         label: provider.label,
-        baseURL: (raw.baseURL || provider.baseURL).replace(/\/+$/, ''),
-        model: raw.model || provider.model,
-        apiKey: decrypt(raw.apiKey),
-        configured: !!decrypt(raw.apiKey)
+        baseURL: (ext.baseURL || raw.baseURL || provider.baseURL).replace(/\/+$/, ''),
+        model: ext.model || raw.model || provider.model,
+        apiKey,
+        configured: !!apiKey,
+        fromExternal: !!ext.apiKey
     };
 }
 
 /** 出参脱敏：API Key 永不明文返回 */
 function publicConfig() {
     const raw = store.get('aiConfig') || {};
+    const ext = secrets.aiOverride();
     return {
         provider: raw.provider || 'deepseek',
         baseURL: raw.baseURL || '',
         model: raw.model || '',
-        hasKey: !!(raw.apiKey && decrypt(raw.apiKey)),
+        hasKey: !!(ext.apiKey || (raw.apiKey && decrypt(raw.apiKey))),
+        externalKey: !!ext.apiKey,
         providers: PROVIDERS
     };
 }
@@ -206,6 +212,7 @@ function saveConfig(payload = {}) {
     // 传入新 Key（非掩码占位）才更新密文
     if (payload.apiKey && payload.apiKey !== mask()) {
         next.apiKey = encrypt(payload.apiKey);
+        secrets.syncSetAi(payload.apiKey);
     }
     store.set('aiConfig', next);
     return { ok: true, config: publicConfig() };

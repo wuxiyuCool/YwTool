@@ -16,6 +16,7 @@
 const store = require('../store');
 const audit = require('../auditLogger');
 const dbAdapters = require('../dbAdapters');
+const secrets = require('../secrets');
 const { encrypt, mask } = require('../crypto');
 
 const TYPES = [
@@ -123,6 +124,7 @@ function setup(ipcMain) {
         data.updatedAt = store.nowText();
 
         const saved = store.upsert('dbSources', data);
+        if (incoming && incoming !== mask()) secrets.syncSet('db:' + saved.id, incoming);
         log(`${prev ? '修改' : '新增'}数据源「${saved.name}」（${saved.type} ${saved.host || '-'}:${saved.port}）`);
         return { ok: true, source: sanitize(saved) };
     });
@@ -131,6 +133,7 @@ function setup(ipcMain) {
         const src = store.find('dbSources', id);
         if (!src) return { ok: false, message: '数据源不存在' };
         const ok = store.remove('dbSources', id);
+        if (ok) secrets.syncRemove('db:' + id);
         if (ok) log(`删除数据源「${src.name}」（${src.type}）`);
         return { ok };
     });

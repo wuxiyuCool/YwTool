@@ -48,7 +48,8 @@ const MODULES = [
     { id: 'rules', domain: 'system', label: '敏感词配置', desc: '命令拦截规则与白名单', pages: ['sensitive'], caps: ['viewer', 'admin'] },
     { id: 'audit', domain: 'system', label: '日志审计', desc: '操作留痕与异常告警', pages: ['audit'], caps: ['viewer', 'admin'] },
     { id: 'alerts', domain: 'system', label: '告警中心', desc: '顶栏告警铃铛与确认', pages: [], caps: ['viewer', 'operator', 'admin'] },
-    { id: 'users', domain: 'system', label: '用户与权限', desc: '账号、角色与模块权限矩阵', pages: [], caps: ['viewer', 'admin'] },
+    { id: 'users', domain: 'system', label: '用户与权限', desc: '账号、角色与模块权限矩阵', pages: ['users'], caps: ['viewer', 'admin'] },
+    { id: 'backup', domain: 'system', label: '备份与密钥', desc: '加密备份导入导出 · 外置密钥注入', pages: ['backup'], caps: ['viewer', 'admin'] },
     { id: 'settings', domain: 'system', label: '系统设置', desc: '运行参数与依赖状态', pages: ['system'], caps: ['viewer', 'admin'] },
     { id: 'ai', domain: 'system', label: 'AI 助手', desc: 'AI 对话 · 脚本生成与优化', pages: ['aiconfig'], caps: ['viewer', 'operator', 'admin'] }
 ];
@@ -91,7 +92,8 @@ const CHANNEL_RULES = [
     ['system:users:*', 'users'],
     ['system:perms:*', 'users'],
     ['system:modules:*', 'users'],
-    ['system:backup:*', 'settings'],
+    ['system:backup:*', 'backup'],
+    ['system:secrets:*', 'backup'],
     ['system:env', 'settings'],
     ['system:config:*', 'settings'],
 
@@ -121,6 +123,7 @@ const ROLE_MODULE_DEFAULTS = {
         alerts: 'operator',
         ai: 'operator',
         users: null,
+        backup: null,
         settings: null
     },
     '审计员': {
@@ -141,6 +144,7 @@ const ROLE_MODULE_DEFAULTS = {
         audit: 'viewer',
         alerts: 'viewer',
         users: null,
+        backup: null,
         settings: null
     }
 };

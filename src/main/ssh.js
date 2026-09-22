@@ -4,7 +4,7 @@
  * - 并发：受 config.maxConcurrency 限制，分批执行，避免压垮内网
  */
 const fs = require('fs');
-const { decrypt } = require('./crypto');
+const secrets = require('./secrets');
 
 function loadSsh2() {
     try {
@@ -74,10 +74,10 @@ function execOnHost(host, cmd, timeoutSec = 30, maxOutput = 20000) {
         };
 
         if (host.authType === 'password') {
-            options.password = decrypt(host.password);
+            options.password = secrets.resolve('host:' + host.id, host.password);
         } else if (host.keyPath && fs.existsSync(host.keyPath)) {
             options.privateKey = fs.readFileSync(host.keyPath);
-            if (host.passphrase) options.passphrase = decrypt(host.passphrase);
+            if (host.passphrase) options.passphrase = secrets.resolve('host:' + host.id + ':passphrase', host.passphrase);
         } else if (host.privateKey) {
             options.privateKey = host.privateKey;
         } else {

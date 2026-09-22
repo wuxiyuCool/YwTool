@@ -99,6 +99,7 @@ function demoFallback(channel, data) {
         case 'audit:paths':
             return { logDir: demo.demoEnv.logDir, today: demo.demoEnv.todayLog, dataFile: demo.demoEnv.dataFile };
         case 'system:env': return demo.demoEnv;
+        case 'system:secrets:status': return { ok: true, file: '(演示模式)', exists: false, error: null, aiKeys: [], secretKeys: [], count: 0 };
         case 'system:config:get': return demo.demoConfig;
         case 'system:users:list': return demo.demoUsers;
         case 'system:modules:list': return demo.demoModuleMeta;
@@ -446,6 +447,12 @@ export const api = {
         backup: {
             export: payload => invoke('system:backup:export', payload),
             import: payload => invoke('system:backup:import', payload)
+        },
+        /** 外置密钥配置：状态查看 / 生成模板 / 明文转本机密文 */
+        secrets: {
+            status: () => invoke('system:secrets:status'),
+            template: () => invoke('system:secrets:template'),
+            encrypt: plain => invoke('system:secrets:encrypt', { plain })
         }
     },
 

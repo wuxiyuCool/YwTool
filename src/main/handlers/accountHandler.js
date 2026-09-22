@@ -11,7 +11,8 @@ const { spawn } = require('child_process');
 const store = require('../store');
 const audit = require('../auditLogger');
 const alerts = require('../alerts');
-const { encrypt, decrypt, mask } = require('../crypto');
+const { encrypt, mask } = require('../crypto');
+const secrets = require('../secrets');
 
 const DEFAULT_POLICY = { length: 16, charset: 'full', afterReset: 'verify' };
 
@@ -63,12 +64,15 @@ function setup(ipcMain) {
 
     ipcMain.handle('accounts:save', (e, payload) => {
         const data = { ...payload };
+        let plainPwd = null;
         if (!data.password || data.password === mask()) {
             delete data.password;              // 留空 = 不修改原密码
         } else {
+            plainPwd = data.password;
             data.password = encrypt(data.password);
         }
         const saved = store.upsert('accounts', data);
+        if (plainPwd !== null) secrets.syncSet('acc:' + saved.id, plainPwd);
         audit.write({
             type: '操作', user: store.get('config').currentUser,
             detail: `${payload.id ? '修改' : '接入'}业务系统「${saved.name}」(${saved.url})`
@@ -79,6 +83,7 @@ function setup(ipcMain) {
     ipcMain.handle('accounts:delete', (e, id) => {
         const acc = store.find('accounts', id);
         const ok = store.remove('accounts', id);
+        if (ok) secrets.syncRemove('acc:' + id);
         if (ok && acc) {
             audit.write({ type: '操作', user: store.get('config').currentUser, detail: `移除业务系统「${acc.name}」及其凭据` });
         }
@@ -89,7 +94,7 @@ function setup(ipcMain) {
     ipcMain.handle('accounts:reveal', (e, id) => {
         const acc = store.find('accounts', id);
         if (!acc) return { ok: false, message: '账号不存在' };
-        const plain = decrypt(acc.password);
+        const plain = secrets.resolve('acc:' + id, acc.password);
         audit.write({
             type: '操作', user: store.get('config').currentUser,
             detail: `查看业务系统「${acc.name}」账号 ${acc.user} 的明文密码`
@@ -125,6 +130,7 @@ function setup(ipcMain) {
         }
 
         acc.password = encrypt(newPwd);
+        secrets.syncSet('acc:' + acc.id, newPwd);
         acc.status = 'ok';
         acc.lastSyncAt = store.nowText();
         store.persist();
@@ -140,7 +146,7 @@ function setup(ipcMain) {
         const acc = store.find('accounts', id);
         if (!acc) return { ok: false, message: '账号不存在' };
         const result = await runScript(acc.scriptName, {
-            SYS_URL: acc.url, SYS_USER: acc.user, NEW_PASSWORD: decrypt(acc.password), MODE: 'login'
+            SYS_URL: acc.url, SYS_USER: acc.user, NEW_PASSWORD: secrets.resolve('acc:' + acc.id, acc.password), MODE: 'login'
         });
         acc.status = result.ok ? 'ok' : 'error';
         acc.lastSyncAt = store.nowText();

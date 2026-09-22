@@ -40,6 +40,8 @@ const PAGES = [
     { id: 'sensitive', label: '敏感词配置', domain: 'system', module: 'rules' },
     { id: 'audit', label: '日志审计', domain: 'system', module: 'audit' },
     { id: 'aiconfig', label: 'AI 配置', domain: 'system', module: 'ai' },
+    { id: 'users', label: '用户与权限', domain: 'system', module: 'users' },
+    { id: 'backup', label: '备份与密钥', domain: 'system', module: 'backup' },
     { id: 'system', label: '系统设置', domain: 'system', module: 'settings' }
 ];
 

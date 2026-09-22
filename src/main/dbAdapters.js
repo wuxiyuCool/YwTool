@@ -7,7 +7,7 @@
  *   - Oracle：表 · 视图 · 存储过程/函数 · 包 · 序列 · 触发器 · 调度作业(Scheduler)
  *   - PostgreSQL：表 · 视图(含物化) · 函数 · 序列 · 触发器 · 定时作业(需 pg_cron)
  */
-const { decrypt } = require('./crypto');
+const secrets = require('./secrets');
 
 function loadDriver(name) {
     try {
@@ -77,7 +77,7 @@ async function testMysql(source, started) {
         host: source.host,
         port: source.port || 3306,
         user: source.user,
-        password: decrypt(source.password),
+        password: secrets.resolve('db:' + source.id, source.password),
         database: source.database || undefined,
         connectTimeout: 8000
     });
@@ -95,7 +95,7 @@ async function testOracle(source, started) {
 
     const conn = await oracledb.getConnection({
         user: source.user,
-        password: decrypt(source.password),
+        password: secrets.resolve('db:' + source.id, source.password),
         connectString: `${source.host}:${source.port || 1521}/${source.database}`
     });
     const result = await conn.execute('SELECT banner FROM v$version WHERE rownum = 1');
@@ -111,7 +111,7 @@ async function testPostgres(source, started) {
     if (!pg) return { ok: false, durationMs: Date.now() - started, message: DEP_HINT.postgres };
     const client = new pg.Client({
         host: source.host, port: source.port || 5432, user: source.user,
-        password: decrypt(source.password), database: source.database || undefined,
+        password: secrets.resolve('db:' + source.id, source.password), database: source.database || undefined,
         connectionTimeoutMillis: 8000
     });
     await client.connect();
@@ -129,7 +129,7 @@ async function query(source, sql, params = []) {
         if (!mysql) throw new Error(DEP_HINT.mysql);
         const conn = await mysql.createConnection({
             host: source.host, port: source.port || 3306, user: source.user,
-            password: decrypt(source.password), database: source.database || undefined
+            password: secrets.resolve('db:' + source.id, source.password), database: source.database || undefined
         });
         try {
             const [res] = await conn.query(sql, params);
@@ -147,7 +147,7 @@ async function query(source, sql, params = []) {
         const oracledb = loadDriver('oracledb');
         if (!oracledb) throw new Error(DEP_HINT.oracle);
         const conn = await oracledb.getConnection({
-            user: source.user, password: decrypt(source.password),
+            user: source.user, password: secrets.resolve('db:' + source.id, source.password),
             connectString: `${source.host}:${source.port || 1521}/${source.database}`
         });
         try {
@@ -173,7 +173,7 @@ async function query(source, sql, params = []) {
         if (!pg) throw new Error(DEP_HINT.postgres);
         const client = new pg.Client({
             host: source.host, port: source.port || 5432, user: source.user,
-            password: decrypt(source.password), database: source.database || undefined
+            password: secrets.resolve('db:' + source.id, source.password), database: source.database || undefined
         });
         await client.connect();
         try {
@@ -202,7 +202,7 @@ async function openSession(source) {
         if (!mysql) throw new Error(DEP_HINT.mysql);
         const conn = await mysql.createConnection({
             host: source.host, port: source.port || 3306, user: source.user,
-            password: decrypt(source.password), database: source.database || undefined
+            password: secrets.resolve('db:' + source.id, source.password), database: source.database || undefined
         });
         return {
             type: 'mysql',
@@ -221,7 +221,7 @@ async function openSession(source) {
         const oracledb = loadDriver('oracledb');
         if (!oracledb) throw new Error(DEP_HINT.oracle);
         const conn = await oracledb.getConnection({
-            user: source.user, password: decrypt(source.password),
+            user: source.user, password: secrets.resolve('db:' + source.id, source.password),
             connectString: `${source.host}:${source.port || 1521}/${source.database}`
         });
         return {
@@ -264,7 +264,7 @@ async function openSession(source) {
         if (!pg) throw new Error(DEP_HINT.postgres);
         const client = new pg.Client({
             host: source.host, port: source.port || 5432, user: source.user,
-            password: decrypt(source.password), database: source.database || undefined
+            password: secrets.resolve('db:' + source.id, source.password), database: source.database || undefined
         });
         await client.connect();
         return {

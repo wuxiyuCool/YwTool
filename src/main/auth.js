@@ -29,6 +29,7 @@ const ADMIN_ONLY = new Set([
     'system:perms:save', 'system:perms:reset',
     // 配置备份包含凭据明文（信封内），导入会整库覆写：仅系统管理员
     'system:backup:export', 'system:backup:import',
+    'system:secrets:status', 'system:secrets:template', 'system:secrets:encrypt',
     // 凭据台账：列表与解密查看均仅系统管理员
     'ledger:list', 'ledger:reveal', 'ledger:unlock', 'ledger:lock', 'ledger:status',
     // 容器运维：端点凭据管理与容器内命令、本机 compose 属高危

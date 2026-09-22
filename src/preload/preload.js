@@ -78,6 +78,7 @@ const validChannels = [
     // 系统管理
     'system:env', 'system:config:get', 'system:config:save',
     'system:backup:export', 'system:backup:import',
+    'system:secrets:status', 'system:secrets:template', 'system:secrets:encrypt',
     'system:users:list', 'system:users:save', 'system:users:delete',
     'system:modules:list', 'system:perms:get', 'system:perms:save', 'system:perms:reset',
 

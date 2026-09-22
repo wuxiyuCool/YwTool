@@ -35,7 +35,9 @@ function seeds() {
             alertMode: 'ui',
             currentUser: 'admin',
             // 模块权限总开关：关闭后所有角色按系统内置默认权限执行
-            modulePermEnabled: true
+            modulePermEnabled: true,
+            // 凭据保存时自动同步到外置密钥文件（v1: 密文落盘）
+            secretsAutoSync: true
         },
         // AI 模型配置（apiKey 为密文，出参一律掩码）
         aiConfig: {

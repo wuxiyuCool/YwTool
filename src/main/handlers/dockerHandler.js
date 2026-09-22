@@ -15,6 +15,7 @@ const store = require('../store');
 const audit = require('../auditLogger');
 const auth = require('../auth');
 const containers = require('../containers');
+const secrets = require('../secrets');
 const { encrypt, mask } = require('../crypto');
 
 const operator = () => (auth.getSession() || {}).username || '-';
@@ -56,6 +57,7 @@ function setup(ipcMain) {
             data.host = data.host || ''; data.port = ''; data.hostId = '';
         }
         const saved = store.upsert('dockerHosts', data);
+        if (data.token && data.token !== mask()) secrets.syncSet('docker:' + saved.id, payload.token);
         containers.dropBridge(saved.id);             // 端点变更后重建 SSH 桥接
         audit.write({
             type: '操作', user: operator(),
@@ -67,6 +69,7 @@ function setup(ipcMain) {
     ipcMain.handle('docker:host:delete', (e, id) => {
         const host = store.find('dockerHosts', id);
         const ok = store.remove('dockerHosts', id);
+        if (ok) secrets.syncRemove('docker:' + id);
         containers.dropBridge(id);
         if (ok && host) audit.write({ type: '操作', user: operator(), detail: `删除 Docker 端点「${host.name}」` });
         return { ok };

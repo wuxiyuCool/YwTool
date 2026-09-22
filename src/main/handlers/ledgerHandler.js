@@ -12,7 +12,8 @@
 const store = require('../store');
 const audit = require('../auditLogger');
 const auth = require('../auth');
-const { decrypt, mask, verifyPassword } = require('../crypto');
+const { mask, verifyPassword } = require('../crypto');
+const secrets = require('../secrets');
 
 /** Vault 式解锁会话：口令校验一次后，有效期内查看其它条目免重复输入（参考 Vault token TTL） */
 const UNLOCK_TTL_MS = 5 * 60 * 1000;
@@ -130,7 +131,7 @@ function setup(ipcMain) {
 
         const item = store.find(def.coll, id);
         if (!item) return { ok: false, message: '凭据不存在（可能已被删除）' };
-        const plain = decrypt(secretOf(item));
+        const plain = secrets.resolve('ledger:' + id, secretOf(item));
         if (!plain) return { ok: false, message: '该条目没有已保存的口令，或密文无法解密（本机密钥与数据不匹配）' };
 
         audit.write({
