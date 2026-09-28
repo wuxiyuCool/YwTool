@@ -577,6 +577,11 @@ export async function mount(r) {
     });
     root.querySelector('#ns-send').addEventListener('click', doSend);
     root.querySelector('#ns-save-case').addEventListener('click', saveCase);
+    root.querySelector('#ns-curl-parse').addEventListener('click', () => openCurlModal('parse'));
+    root.querySelector('#ns-curl-gen').addEventListener('click', () => openCurlModal('gen'));
+    root.querySelector('#cm-ok').addEventListener('click', curlModalOk);
+    root.querySelectorAll('#curl-modal [data-cm-close]').forEach(el => el.addEventListener('click', closeCurlModal));
+    root.querySelector('#curl-modal').addEventListener('click', e => { if (e.target === e.currentTarget) closeCurlModal(); });
 
     root.querySelector('#np-start').addEventListener('click', async () => {
         if (!guardAdmin('启动抓包代理')) return;
