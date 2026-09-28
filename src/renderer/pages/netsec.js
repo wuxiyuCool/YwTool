@@ -50,6 +50,8 @@ function sendPane() {
             <input class="input" id="ns-timeout" type="number" min="1000" step="1000" value="30000" title="超时（毫秒）" style="width:92px">
             <button class="btn btn-primary" data-write id="ns-send">发送</button>
             <button class="btn btn-ghost" data-write id="ns-save-case" title="把当前请求收藏为案例">收藏</button>
+            <button class="btn btn-ghost" id="ns-curl-parse" title="粘贴 curl 命令，反向解析为请求">解析 curl</button>
+            <button class="btn btn-ghost" id="ns-curl-gen" title="把当前请求导出为 curl 命令">生成 curl</button>
         </div>
         <div class="grid-2" style="align-items:start">
             <div>
@@ -148,6 +150,25 @@ export function render() {
             ${TABS.map(t => `<div class="tab ${t.id === currentTab ? 'active' : ''}" data-tab="${t.id}">${t.label}</div>`).join('')}
         </div>
         ${sendPane()}${proxyPane()}${casesPane()}${historyPane()}
+    </div>
+    <div class="modal-mask" id="curl-modal">
+        <div class="modal" style="width:680px;max-width:94vw">
+            <div class="modal-header">
+                <h3 id="cm-title">curl</h3>
+                <button class="modal-close" data-cm-close>×</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-item">
+                    <textarea class="textarea code-input" id="cm-text" rows="12" spellcheck="false"></textarea>
+                </div>
+                <div class="form-hint" id="cm-hint"></div>
+            </div>
+            <div class="modal-footer">
+                <div class="spacer"></div>
+                <button class="btn btn-ghost" data-cm-close>取消</button>
+                <button class="btn btn-primary" id="cm-ok">确定</button>
+            </div>
+        </div>
     </div>
     <div class="modal-mask" id="bp-modal">
         <div class="modal etl-modal" style="width:820px;max-width:94vw">
@@ -262,7 +283,171 @@ function fillForm(req) {
     showTab('send');
 }
 
-/* ---------------- 案例 / 历史 ---------------- */
+/* ---------------- curl 双向转换 ----------------
+   纯前端实现：解析粘贴的 curl 命令填入表单；把当前请求导出为 curl。
+   覆盖常用参数集（-X/-H/-d 系列/-u/-b/--url），布尔参数忽略，带值白名单消费参数，
+   其余未知 -开头 token 记为警告不消费，避免吞掉后面的 URL。
+*/
+
+/** Shell 风格切词：单引号原文、双引号内反转义、裸反斜杠转义下一字符 */
+function tokenizeShell(input) {
+    const tokens = [];
+    let cur = '';
+    let has = false;
+    for (let i = 0; i < input.length; i++) {
+        const c = input[i];
+        if (c === '\\') {
+            if (i + 1 < input.length) { cur += input[++i]; has = true; }
+            continue;
+        }
+        if (c === "'") {
+            let j = i + 1;
+            while (j < input.length && input[j] !== "'") cur += input[j++];
+            has = true;
+            i = j;
+            continue;
+        }
+        if (c === '"') {
+            let j = i + 1;
+            while (j < input.length && input[j] !== '"') {
+                if (input[j] === '\\' && j + 1 < input.length) j++;
+                cur += input[j++];
+            }
+            has = true;
+            i = j;
+            continue;
+        }
+        if (/\s/.test(c)) {
+            if (has) { tokens.push(cur); cur = ''; has = false; }
+            continue;
+        }
+        cur += c;
+        has = true;
+    }
+    if (has) tokens.push(cur);
+    return tokens;
+}
+
+const CURL_VALUE_FLAGS = {
+    '-X': 'method', '--request': 'method',
+    '-H': 'header', '--header': 'header',
+    '-d': 'data', '--data': 'data', '--data-raw': 'data', '--data-binary': 'data', '--data-ascii': 'data', '--data-urlencode': 'data',
+    '-u': 'user', '--user': 'user',
+    '-b': 'cookie', '--cookie': 'cookie',
+    '--url': 'url',
+    '-A': 'ua', '--user-agent': 'ua',
+    '-e': 'referer', '--referer': 'referer',
+    '-o': 'skip', '--output': 'skip', '-m': 'skip', '--max-time': 'skip', '--connect-timeout': 'skip',
+    '-x': 'skip', '--proxy': 'skip', '--cacert': 'skip', '--cert': 'skip', '--key': 'skip', '-T': 'skip', '--upload-file': 'skip',
+    '--resolve': 'skip', '--interface': 'skip', '--max-filesize': 'skip'
+};
+const CURL_BOOL_FLAGS = new Set(['-s', '--silent', '-S', '--show-error', '-L', '--location', '-k', '--insecure',
+    '--compressed', '-i', '-I', '-v', '--verbose', '-N', '--no-buffer', '-g', '--globoff', '--http2', '--http1.1',
+    '--anyauth', '-j', '--junk-session-cookies', '--fail', '-r', '--ssl-no-revoke']);
+
+function parseCurl(text) {
+    const tokens = tokenizeShell(String(text || '').replace(/\\\r?\n/g, ' ').replace(/\^\r?\n/g, ' '));
+    const headers = {};
+    const datas = [];
+    const warnings = [];
+    let method = '';
+    let url = '';
+    if (!tokens.length || !/^curl$/i.test(tokens[0])) warnings.push('未以 curl 开头，按 curl 参数尽力解析');
+    for (let i = tokens.length && /^curl$/i.test(tokens[0]) ? 1 : 0; i < tokens.length; i++) {
+        const t = tokens[i];
+        if (!t) continue;
+        if (/^https?:\/\//i.test(t)) { if (!url) url = t; else warnings.push(`忽略多余的位置参数「${t.slice(0, 40)}」`); continue; }
+        if (t[0] !== '-') { warnings.push(`忽略无法识别的参数「${t.slice(0, 40)}」`); continue; }
+        const kind = CURL_VALUE_FLAGS[t];
+        if (!kind) {
+            if (!CURL_BOOL_FLAGS.has(t)) warnings.push(`忽略未知选项 ${t}`);
+            continue;
+        }
+        const val = tokens[++i];
+        if (val === undefined) { warnings.push(`选项 ${t} 缺少参数`); continue; }
+        if (kind === 'method') method = val.toUpperCase();
+        else if (kind === 'url') url = val;
+        else if (kind === 'data') datas.push(val);
+        else if (kind === 'header') {
+            const idx = val.indexOf(':');
+            if (idx > 0) headers[val.slice(0, idx).trim()] = val.slice(idx + 1).trim();
+            else warnings.push(`Header 缺少冒号：${val.slice(0, 40)}`);
+        }
+        else if (kind === 'user') headers.Authorization = `Basic ${textToB64(val)}`;
+        else if (kind === 'cookie') headers.Cookie = val;
+        else if (kind === 'ua') headers['User-Agent'] = val;
+        else if (kind === 'referer') headers.Referer = val;
+        // skip：值已消费
+    }
+    const body = datas.join('&');
+    return {
+        method: method || (datas.length ? 'POST' : 'GET'),
+        url,
+        headers,
+        body,
+        warnings
+    };
+}
+
+/** 单引号安全包裹（'\\'' 续接法），生成 bash 可直接粘贴执行的 curl */
+const curlQuote = s => `'${String(s).replace(/'/g, `'\\''`)}'`;
+
+function buildCurl(req) {
+    const method = req.method || 'GET';
+    const lines = [`curl -X ${method} ${curlQuote(req.url)}`];
+    Object.entries(req.headers || {}).forEach(([k, v]) => lines.push(`  -H ${curlQuote(`${k}: ${v}`)}`));
+    if (req.body && method !== 'GET' && method !== 'HEAD') lines.push(`  --data-raw ${curlQuote(req.body)}`);
+    return lines.join(' \\\n');
+}
+
+let curlMode = 'parse';
+
+function openCurlModal(mode) {
+    curlMode = mode;
+    const ta = root.querySelector('#cm-text');
+    if (mode === 'gen') {
+        let req;
+        try { req = collectRequest(); } catch (err) { toast(err.message, 'warn'); return; }
+        if (!req.url) { toast('请先填写 URL', 'warn'); return; }
+        root.querySelector('#cm-title').textContent = '当前请求 → curl 命令';
+        ta.value = buildCurl(req);
+        ta.readOnly = true;
+        root.querySelector('#cm-hint').textContent = '已按请求生成（body 用 --data-raw 原样携带），可直接复制到终端执行。';
+        root.querySelector('#cm-ok').textContent = '复制命令';
+    } else {
+        root.querySelector('#cm-title').textContent = 'curl 命令 → 请求';
+        ta.value = '';
+        ta.readOnly = false;
+        ta.placeholder = "粘贴 curl 命令，例如：\ncurl -X POST 'http://127.0.0.1:8080/api/v1/chat' \\\n  -H 'Content-Type: application/json' \\\n  -d '{\"msg\":\"hi\"}'";
+        root.querySelector('#cm-hint').textContent = '支持 -X/-H/-d 系列/-u/-b/--url 等常用参数；-L/-k/--compressed 等开关自动忽略。';
+        root.querySelector('#cm-ok').textContent = '解析并填入';
+    }
+    root.querySelector('#curl-modal').classList.add('open');
+    setTimeout(() => { ta.focus(); if (mode === 'gen') ta.select(); }, 30);
+}
+
+function closeCurlModal() {
+    root.querySelector('#curl-modal').classList.remove('open');
+}
+
+function curlModalOk() {
+    if (curlMode === 'gen') {
+        navigator.clipboard.writeText(root.querySelector('#cm-text').value)
+            .then(() => { toast('curl 命令已复制', 'success'); closeCurlModal(); })
+            .catch(() => toast('复制失败，请手动选中复制', 'warn'));
+        return;
+    }
+    const res = parseCurl(root.querySelector('#cm-text').value);
+    if (!res.url) { toast('未解析出 URL，请检查命令', 'warn'); return; }
+    fillForm(res);
+    closeCurlModal();
+    const bits = [`${res.method}`, `${Object.keys(res.headers).length} 个头`, res.body ? '含 Body' : '无 Body'];
+    if (res.warnings.length) toast(`已解析（${bits.join('，')}）；${res.warnings.length} 条提示见控制台`, 'warn');
+    else toast(`已解析填入：${bits.join('，')}`, 'success');
+    if (res.warnings.length) console.warn('curl 解析提示：\n' + res.warnings.join('\n'));
+}
+
+
 
 async function loadCases() {
     try {
