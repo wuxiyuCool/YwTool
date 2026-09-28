@@ -24,6 +24,7 @@ const scriptUtil = require('../scriptUtil');
 
 const IDLE_TIMEOUT_MS = 30 * 60 * 1000;   // 30 分钟无活动自动断开
 const MAX_SESSIONS = 16;                   // 并发会话上限，防资源耗尽
+const OUTPUT_BUF_LIMIT = 32 * 1024;        // 每会话保留最近输出（Agent 回溯用）
 
 /** sessionId → { conn, stream, hostId, hostName, lastActive, closed } */
 const sessions = new Map();
@@ -98,10 +99,17 @@ function setup(ipcMain) {
                     return;
                 }
                 settled = true;
-                const sess = { conn, stream, hostId, hostName: `${host.name}（${host.ip}）`, lastActive: Date.now(), closed: false };
+                const sess = { conn, stream, hostId, hostName: `${host.name}（${host.ip}）`, lastActive: Date.now(), closed: false, buf: '' };
                 sessions.set(sessionId, sess);
-                stream.on('data', chunk => { if (sessions.has(sessionId)) { touch(sess); push(targetWin, 'terminal:data', { sessionId, chunk: chunk.toString('utf8') }); } });
-                stream.stderr.on('data', chunk => { if (sessions.has(sessionId)) { touch(sess); push(targetWin, 'terminal:data', { sessionId, chunk: chunk.toString('utf8') }); } });
+                const onData = chunk => {
+                    if (!sessions.has(sessionId)) return;
+                    touch(sess);
+                    const text = chunk.toString('utf8');
+                    sess.buf = (sess.buf + text).slice(-OUTPUT_BUF_LIMIT);   // 保留最近输出供 Agent 回溯
+                    push(targetWin, 'terminal:data', { sessionId, chunk: text });
+                };
+                stream.on('data', onData);
+                stream.stderr.on('data', onData);
                 stream.on('close', () => {
                     destroySession(sessionId, '远端退出');
                     push(targetWin, 'terminal:exit', { sessionId, message: '会话已结束' });
@@ -172,4 +180,68 @@ function setup(ipcMain) {
     }));
 }
 
-module.exports = { setup, closeAll, sessionCount: () => sessions.size };
+/** 活跃会话清单（Agent 工具 list_terminals 用） */
+function listSessions() {
+    return [...sessions.entries()].map(([id, s]) => ({
+        sessionId: id, hostId: s.hostId, hostName: s.hostName, idleMs: Date.now() - s.lastActive
+    }));
+}
+
+/**
+ * 在指定终端会话中执行一条命令并取回输出（Agent 排障用）。
+ * 实现：写入命令后追加唯一 marker echo，轮询会话缓冲直到 marker 出现（命令结束）或超时。
+ * 与用户共用同一 shell —— 环境变量、cwd 延续，这正是"在指定连接上交互"的价值。
+ */
+function agentExec(sessionId, command, timeoutMs = 20000) {
+    return new Promise(resolve => {
+        const s = sessions.get(sessionId);
+        if (!s || s.closed) return resolve({ ok: false, error: '终端会话不存在或已结束（请让用户先在终端工作台连接主机）' });
+        if (!String(command || '').trim()) return resolve({ ok: false, error: '命令为空' });
+        if (/[\r\n]/.test(command)) return resolve({ ok: false, error: '仅支持单行命令' });
+
+        const marker = `__SGOPS_AGENT_${Date.now()}_${Math.floor(Math.random() * 1e6)}__`;
+        const startLen = s.buf.length;
+        let settled = false;
+        const timer = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            clearInterval(poll);
+            resolve({ ok: true, partial: true, output: stripAnsi(s.buf.slice(startLen)).slice(-4000), hostName: s.hostName,
+                note: `命令已发送但 ${Math.round(timeoutMs / 1000)}s 内未结束（可能是交互式/长驻命令），以上为当前输出` });
+        }, timeoutMs);
+
+        const poll = setInterval(() => {
+            if (settled) return;
+            const idx = s.buf.indexOf(marker, startLen);
+            if (idx < 0) return;
+            settled = true;
+            clearTimeout(timer); clearInterval(poll);
+            // marker 行格式：__SGOPS_AGENT_xxx__ <exitcode>
+            const tail = s.buf.slice(idx + marker.length, idx + marker.length + 8);
+            const codeMatch = /^\s*(-?\d+)/.exec(tail);
+            const output = stripAnsi(s.buf.slice(startLen, idx));
+            touch(s);
+            resolve({ ok: true, exitCode: codeMatch ? Number(codeMatch[1]) : null, output: output.slice(-6000), hostName: s.hostName });
+        }, 150);
+
+        touch(s);
+        try {
+            // 用前导空格降低 history/别名干扰；marker 打印退出码
+            s.stream.write(`${command}\nprintf '\\n%s %s\\n' '${marker}' $?\n`, 'utf8');
+        } catch (err) {
+            settled = true; clearTimeout(timer); clearInterval(poll);
+            resolve({ ok: false, error: '写入失败：' + err.message });
+        }
+    });
+}
+
+/** 去 ANSI 转义（Agent 拿纯文本即可） */
+function stripAnsi(text) {
+    return String(text || '')
+        .replace(/\x1b\][^\x07\x1b]*(\x07|\x1b\\)/g, '')
+        .replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '')
+        .replace(/\x1b[@-Z\\-_]?/g, '')
+        .replace(/\r/g, '');
+}
+
+module.exports = { setup, closeAll, listSessions, agentExec, sessionCount: () => sessions.size };

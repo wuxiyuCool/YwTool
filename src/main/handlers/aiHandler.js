@@ -4,10 +4,13 @@
  *       ai:sessions:list|new|switch|delete / ai:script:generate|optimize
  *       ai:model:get|save / ai:agent:get|save|toggle|tools
  *       ai:roles:list / ai:roles:save|delete（管理员）/ ai:role:save（用户选择默认角色）
+ *       ai:approval:reply（渲染层回执 Agent 高危执行审批）/ 推送 ai:approval
  *
  * 安全约束：
  *   - ai:config:save / ai:test / ai:roles:save / ai:roles:delete 为管理员专属（auth.ADMIN_ONLY）
  *   - ai:chat / ai:script:* 为写操作，需 operator 及以上
+ *   - Agent 高危执行（run_host_command/run_batch_command/terminal_run）在 execApproval 开启时经审批回路，超时/拒绝即不执行
+ *   - Agent 操作目标受 scope 圈定：hostIds/dbIds/sessionIds 由渲染层勾选，主进程清洗并强制
  *   - 会话按用户隔离（db.aiSessions[username]，多会话 + 激活指针 db.aiActive）
  *   - 提示词角色只影响 system 提示，不改变任何权限边界
  *   - 每次 AI 调用写入审计日志（含耗时，不含明文内容）
@@ -24,6 +27,41 @@ const operator = () => (auth.getSession() || {}).username || '-';
 
 function log(detail, result = 'success') {
     audit.write({ type: '操作', user: operator(), detail, result });
+}
+
+/* ---------------- Agent 执行审批回路 ---------------- */
+
+const APPROVAL_TIMEOUT_MS = 120 * 1000;
+/** requestId → { resolve, timer } */
+const pendingApprovals = new Map();
+let approvalSeq = 0;
+
+/** 推送审批请求到渲染层，等待用户同意/拒绝；超时或窗口销毁视为拒绝 */
+function requestApproval(sender, info) {
+    return new Promise(resolve => {
+        if (!sender || sender.isDestroyed()) return resolve(false);
+        const requestId = `ap_${Date.now()}_${++approvalSeq}`;
+        const timer = setTimeout(() => {
+            if (pendingApprovals.has(requestId)) {
+                pendingApprovals.delete(requestId);
+                audit.write({ type: '拦截', user: operator(), result: 'blocked', detail: `AI Agent 执行审批超时未确认，自动拒绝：${info.label}` });
+                resolve(false);
+            }
+        }, APPROVAL_TIMEOUT_MS);
+        pendingApprovals.set(requestId, { resolve, timer });
+        sender.send('ai:approval', { requestId, name: info.name, label: info.label, args: info.args });
+    });
+}
+
+/** 清洗渲染层传来的操作范围：仅保留非空字符串 id 数组，去重去空；空类别视为未圈定 */
+function sanitizeScope(scope) {
+    if (!scope || typeof scope !== 'object') return null;
+    const arr = v => Array.isArray(v) ? [...new Set(v.map(String).filter(Boolean))] : undefined;
+    const out = {};
+    const h = arr(scope.hostIds); if (h && h.length) out.hostIds = h;
+    const d = arr(scope.dbIds); if (d && d.length) out.dbIds = d;
+    const s = arr(scope.sessionIds); if (s && s.length) out.sessionIds = s;
+    return (out.hostIds || out.dbIds || out.sessionIds) ? out : null;
 }
 
 /** 读取当前用户的会话列表（旧版单会话 db.aiChats 首次访问时自动迁移） */
@@ -217,14 +255,15 @@ function setup(ipcMain) {
      * 对话：默认流式直答；payload.agent=true 且 Agent 可用时走 function calling 链路
      * steps（工具调用轨迹）经 ai:step 实时推送，不落历史库，仅作为界面过程展示
      */
-    ipcMain.handle('ai:chat', async (event, { messages, agent, role } = {}) => {
+    ipcMain.handle('ai:chat', async (event, { messages, agent, role, scope } = {}) => {
         const user = operator();
         const list = Array.isArray(messages) ? messages.filter(m => m && typeof m.role === 'string') : [];
         if (!list.length) return { ok: false, message: '消息内容为空' };
 
         const started = Date.now();
+        const sender = event.sender;
         const send = payload => {
-            if (!event.sender.isDestroyed()) event.sender.send(payload.channel || 'ai:stream', payload);
+            if (!sender.isDestroyed()) sender.send(payload.channel || 'ai:stream', payload);
         };
         try {
             // Agent 最终以服务端解析为准：即使前端被篡改也拿不到未授权的 Agent 能力
@@ -232,6 +271,7 @@ function setup(ipcMain) {
             const useAgent = !!agent && state.enabled;
             // 提示词角色：本次指定 > 用户默认 > 内置通用（roleId 非法时回落，不报错）
             const system = ai.resolveSystem(role, user);
+            const cleanScope = useAgent ? sanitizeScope(scope) : null;
 
             let text;
             if (useAgent) {
@@ -240,6 +280,9 @@ function setup(ipcMain) {
                     user,
                     system,
                     agent: state.global,
+                    scope: cleanScope,
+                    // 审批回路：高危执行前推 ai:approval，等待渲染层 ai:approval:reply（120s 超时视为拒绝）
+                    approve: state.global.execApproval === false ? null : info => requestApproval(sender, info),
                     onDelta: delta => send({ channel: 'ai:stream', delta }),
                     onStep: step => send({ channel: 'ai:step', ...step })
                 });
@@ -262,6 +305,20 @@ function setup(ipcMain) {
             log(`AI 对话失败：${err.message}`, 'failed');
             return { ok: false, message: err.message };
         }
+    });
+
+    /** 用户对 Agent 高危执行的审批回执：同意/拒绝 → resolve 对应 requestApproval */
+    ipcMain.handle('ai:approval:reply', (e, { requestId, approved } = {}) => {
+        const pending = pendingApprovals.get(String(requestId || ''));
+        if (!pending) return { ok: false, message: '审批请求已过期或不存在' };
+        clearTimeout(pending.timer);
+        pendingApprovals.delete(String(requestId));
+        pending.resolve(!!approved);
+        audit.write({
+            type: '操作', user: operator(), result: approved ? 'success' : 'blocked',
+            detail: `用户${approved ? '同意' : '拒绝'}了 AI Agent 的高危执行请求`
+        });
+        return { ok: true };
     });
 
     ipcMain.handle('ai:chat:history', () => {

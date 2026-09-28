@@ -23,8 +23,9 @@ const AGENT_TOGGLES = [
     { key: 'allowDataGenerate', title: 'generate_data · 生成测试数据', desc: '按字段定义合成 json / csv / sql 测试数据，数据只在本机生成不外发', danger: false },
     { key: 'allowSaveScript', title: 'save_script · 保存为脚本', desc: '把 AI 产出的 Shell / Python 脚本落库到「脚本管理」，同名自动升版本', danger: false },
     { key: 'allowLocalExec', title: 'run_local_command · 执行本机命令', desc: '在平台所在机器执行命令，仍需通过敏感词黑白名单校验并留痕；仅在受控环境开启', danger: true },
-    { key: 'allowRemoteExec', title: 'run_host_command · 远程主机执行命令', desc: '在纳管主机（SSH）上执行单条命令，同样过黑白名单并审计；开启前建议先白名单演练', danger: true },
-    { key: 'allowSqlExecute', title: 'execute_sql / describe_table · 查询数据源', desc: '在已配置数据源上执行只读 SQL 与查看表结构（SELECT / SHOW / DESC / EXPLAIN）', danger: true }
+    { key: 'allowRemoteExec', title: 'run_host_command / run_batch_command / terminal_run · 远程执行', desc: '在纳管主机（SSH）执行单条或批量命令、在已打开的终端会话中执行命令，同样过黑白名单并审计；开启前建议先白名单演练', danger: true },
+    { key: 'allowSqlExecute', title: 'execute_sql / describe_table · 查询数据源', desc: '在已配置数据源上执行只读 SQL 与查看表结构（SELECT / SHOW / DESC / EXPLAIN）', danger: true },
+    { key: 'execApproval', title: '高危执行需审批', desc: '开启后远程命令 / 批量执行 / 终端会话执行等高危工具每次执行前弹窗请求确认（120 秒未处理自动拒绝）；关闭则无需确认直接执行', danger: false }
 ];
 
 export function render() {

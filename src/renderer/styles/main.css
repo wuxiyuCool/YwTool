@@ -1893,6 +1893,172 @@ body.ai-resizing .ai-panel { transition: none; }
     padding: 4px 8px;
 }
 
+/* 操作目标圈定弹层（Agent 白名单） */
+.ai-scope-pop {
+    display: none;
+    margin: 10px 14px 0;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: #fbfcff;
+    flex-shrink: 0;
+    overflow: hidden;
+}
+
+.ai-scope-pop.open { display: block; }
+
+.ai-scope-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 9px 12px;
+    border-bottom: 1px solid var(--border);
+    font-size: 12.5px;
+}
+
+.ai-scope-hint {
+    padding: 7px 12px;
+    font-size: 11px;
+    color: var(--text-3);
+    line-height: 1.6;
+    border-bottom: 1px solid #eef1f7;
+    background: #f6f8ff;
+}
+
+.ai-scope-list { max-height: 260px; overflow-y: auto; }
+
+.ai-scope-group + .ai-scope-group { border-top: 1px solid #eef1f7; }
+
+.ai-scope-group-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 7px 12px 4px;
+    font-size: 11.5px;
+    font-weight: 600;
+    color: var(--text-2);
+}
+
+.ai-scope-group-head span {
+    font-weight: 400;
+    color: var(--text-3);
+    font-size: 11px;
+}
+
+.ai-scope-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px;
+    cursor: pointer;
+    font-size: 12px;
+}
+
+.ai-scope-item:hover { background: #f4f7ff; }
+.ai-scope-item input { flex-shrink: 0; accent-color: var(--primary); }
+
+.ai-scope-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.ai-scope-sub {
+    flex-shrink: 0;
+    font-size: 11px;
+    color: var(--text-3);
+}
+
+.ai-scope-empty {
+    padding: 6px 12px 8px;
+    font-size: 11.5px;
+    color: var(--text-3);
+}
+
+#ai-scope-btn.has-scope {
+    border-color: var(--primary);
+    color: var(--primary);
+    background: var(--primary-soft);
+}
+
+/* Agent 高危执行审批弹窗 */
+.ai-approval-mask {
+    position: fixed;
+    inset: 0;
+    background: rgba(15, 23, 42, 0.45);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1200;
+}
+
+.ai-approval-box {
+    width: 420px;
+    max-width: calc(100vw - 40px);
+    background: var(--card-bg, #fff);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 18px 20px;
+    box-shadow: 0 20px 60px rgba(15, 23, 42, 0.3);
+}
+
+.ai-approval-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--danger);
+    font-size: 14px;
+    margin-bottom: 12px;
+}
+
+.ai-approval-title svg {
+    width: 18px;
+    height: 18px;
+    flex-shrink: 0;
+}
+
+.ai-approval-tool {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    font-size: 13px;
+    margin-bottom: 8px;
+}
+
+.ai-approval-name {
+    font-size: 11px;
+    color: var(--text-3);
+}
+
+.ai-approval-args {
+    margin: 0 0 10px;
+    padding: 10px 12px;
+    max-height: 220px;
+    overflow: auto;
+    background: #0f172a;
+    color: #e2e8f0;
+    border-radius: 8px;
+    font-size: 11.5px;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    word-break: break-all;
+    font-family: Consolas, Menlo, monospace;
+}
+
+.ai-approval-tip {
+    font-size: 11.5px;
+    color: var(--text-3);
+    line-height: 1.6;
+    margin-bottom: 14px;
+}
+
+.ai-approval-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+}
+
 /* 消息级操作行（保存为脚本 / 复制）与行内保存表单 */
 .ai-msg-actions { display: flex; gap: 6px; margin-top: 6px; }
 

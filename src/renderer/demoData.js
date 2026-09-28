@@ -212,6 +212,7 @@ export const demoAiAgentConfig = {
     allowSaveScript: true,
     allowLocalExec: false,
     allowSqlExecute: false,
+    execApproval: true,
     commandTimeout: 15,
     maxRows: 200
 };

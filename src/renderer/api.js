@@ -148,6 +148,7 @@ function demoFallback(channel, data) {
             };
         }
         case 'ai:test': return { ok: true, durationMs: 120, message: `连接成功 · DeepSeek · ${(data && data.model) || 'deepseek-chat'}（演示）` };
+        case 'ai:approval:reply': return { ok: true };
         case 'db:etl:preview':
             return {
                 ok: true, kind: 'db', total: 120,
@@ -589,7 +590,9 @@ export const api = {
             save: payload => invoke('ai:config:save', payload)
         },
         test: model => invoke('ai:test', { model }),
-        chat: (messages, agent = false, role = '') => invoke('ai:chat', { messages, agent, role }),
+        chat: (messages, agent = false, role = '', scope = null) => invoke('ai:chat', { messages, agent, role, scope }),
+        /** Agent 高危执行审批：回传用户决定 */
+        approvalReply: (requestId, approved) => invoke('ai:approval:reply', { requestId, approved }),
         chatHistory: () => invoke('ai:chat:history'),
         chatClear: () => invoke('ai:chat:clear'),
         /** 模型切换：读取可选清单 + 保存用户级偏好 */
@@ -658,6 +661,12 @@ export const api = {
     onAiStep: callback => {
         if (demoMode || typeof bridge.on !== 'function') return () => {};
         return bridge.on('ai:step', callback);
+    },
+
+    /** AI Agent 高危执行审批请求推送（主进程 → 渲染进程弹窗） */
+    onAiApproval: callback => {
+        if (demoMode || typeof bridge.on !== 'function') return () => {};
+        return bridge.on('ai:approval', callback);
     },
 
     /** ETL 同步任务进度推送（读取行数 / 写入行数 / 批次数） */
