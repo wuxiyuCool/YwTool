@@ -27,6 +27,7 @@ const IPC_MODULES = [
     './handlers/systemHandler',
     './handlers/backupHandler',
     './handlers/netsecHandler',
+    './handlers/pcapHandler',
     './handlers/secHandler',
     './handlers/dashboardHandler',
     './handlers/aiHandler'

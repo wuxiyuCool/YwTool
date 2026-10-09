@@ -14,6 +14,8 @@
 const http = require('http');
 const https = require('https');
 const net = require('net');
+const os = require('os');
+const { execFile } = require('child_process');
 const { URL } = require('url');
 const store = require('./store');
 
@@ -159,6 +161,98 @@ function headerPairs(raw) {
     return out;
 }
 
+/* ---------------- 进程归属（类 Fiddler：请求 → 发起进程） ----------------
+   通过 netstat -ano 把「客户端连到本代理的本地端口」反查为 PID，再用
+   tasklist 解析进程名。两次命令都有秒级缓存，失败静默降级为无进程信息。
+*/
+
+const procCache = { ports: { at: 0, map: null }, names: { at: 0, map: null } };
+const PROC_CACHE_MS = 2000;
+
+function runCmd(cmd, args) {
+    return new Promise(resolve => {
+        execFile(cmd, args, { windowsHide: true, timeout: 8000, encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 },
+            (err, stdout) => resolve(stdout || ''));
+    });
+}
+
+async function portPidMap() {
+    if (procCache.ports.map && Date.now() - procCache.ports.at < PROC_CACHE_MS) return procCache.ports.map;
+    const out = await runCmd('netstat', ['-ano']);
+    const map = new Map();
+    String(out).split('\n').forEach(line => {
+        const m = /^\s*TCP\s+(\S+):(\d+)\s+\S+\s+\S+\s+(\d+)\s*$/i.exec(line.trim());
+        if (m) map.set(Number(m[2]), Number(m[3]));
+    });
+    procCache.ports = { at: Date.now(), map };
+    return map;
+}
+
+async function pidNameMap() {
+    if (procCache.names.map && Date.now() - procCache.names.at < 10000) return procCache.names.map;
+    const out = await runCmd('tasklist', ['/fo', 'csv', '/nh']);
+    const map = new Map();
+    String(out).split('\n').forEach(line => {
+        const m = /^"([^"]+)","(\d+)"/.exec(line.trim());
+        if (m) map.set(Number(m[2]), m[1]);
+    });
+    procCache.names = { at: Date.now(), map };
+    return map;
+}
+
+async function resolveProc(localPort) {
+    if (os.platform() !== 'win32' || !localPort) return null;
+    try {
+        const pid = (await portPidMap()).get(Number(localPort));
+        if (!pid) return null;
+        const name = (await pidNameMap()).get(pid);
+        return { pid, name: name || '未知进程' };
+    } catch (e) { return null; }
+}
+
+/* ---------------- 系统代理接管（HKCU 注册表，无需管理员） ---------------- */
+
+const REG_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings';
+let sysProxyPrev = null;    // 接管前的 { enable, server }，用于恢复
+
+async function regQuerySettings() {
+    const out = await runCmd('reg', ['query', REG_KEY]);
+    const enable = (/ProxyEnable\s+REG_DWORD\s+0x([0-9a-f]+)/i.exec(out) || [])[1];
+    const server = (/ProxyServer\s+REG_SZ\s+(.+)/i.exec(out) || [])[1];
+    return { enable: enable !== undefined ? parseInt(enable, 16) : 0, server: (server || '').trim() };
+}
+
+async function regAdd(name, type, value) {
+    const out = await runCmd('reg', ['add', REG_KEY, '/v', name, '/t', type, '/d', String(value), '/f']);
+    return /成功|success/i.test(out) || !/错误|error/i.test(out);
+}
+
+/** action: on（接管到 127.0.0.1:port）/ off（恢复接管前状态）/ status */
+async function sysProxy(payload = {}) {
+    if (os.platform() !== 'win32') return { ok: false, message: '系统代理接管仅支持 Windows' };
+    const action = payload.action;
+    if (action === 'status') {
+        const cur = await regQuerySettings();
+        return { ok: true, enabled: cur.enable === 1 && /127\.0\.0\.1/.test(cur.server), server: cur.server, enable: cur.enable };
+    }
+    if (action === 'on') {
+        if (!proxy.server) return { ok: false, message: '请先启动抓包代理再接管系统代理' };
+        if (!sysProxyPrev) sysProxyPrev = await regQuerySettings();
+        const a = await regAdd('ProxyEnable', 'REG_DWORD', 1);
+        const b = await regAdd('ProxyServer', 'REG_SZ', `127.0.0.1:${proxy.port}`);
+        if (!(a && b)) return { ok: false, message: '写入注册表失败' };
+        return { ok: true, server: `127.0.0.1:${proxy.port}`, note: '部分应用需重启后才读取新代理设置' };
+    }
+    if (action === 'off') {
+        const prev = sysProxyPrev || { enable: 0, server: '' };
+        await regAdd('ProxyEnable', 'REG_DWORD', prev.enable ? 1 : 0);
+        if (prev.server) await regAdd('ProxyServer', 'REG_SZ', prev.server);
+        sysProxyPrev = null;
+        return { ok: true, restored: prev };
+    }
+    return { ok: false, message: '未知操作' };
+}
+
 /** 抓包记录 → 推送到界面 */
 function logPacket(record) {
     proxy.stats.requests++;
@@ -186,8 +280,16 @@ function forwardToClient(socket, record) {
         const isHttps = target.protocol === 'https:';
         const lib = isHttps ? https : http;
         const headers = headerPairs(record.headers);
+        // 重放前归一化：Host 按目标 URL 重算（改域名后原 Host 会导致 404/路由错）；
+        // Content-Length 按实际 body 重算（改包后旧长度会让上游挂起或报 400）；
+        // connection/transfer-encoding 交由 Node 客户端管理（透传 chunked 帧头会破坏分帧）
         delete headers['proxy-connection'];
+        delete headers['host'];
+        delete headers['connection'];
+        delete headers['transfer-encoding'];
         const body = record.body ? Buffer.from(record.body, 'base64') : null;
+        if (body && body.length) headers['content-length'] = String(body.length);
+        else delete headers['content-length'];
         const req = lib.request({
             protocol: target.protocol,
             hostname: target.hostname,
@@ -197,16 +299,26 @@ function forwardToClient(socket, record) {
             headers,
             timeout: DEFAULT_TIMEOUT_MS
         }, upstream => {
-            const head = [`HTTP/1.1 ${upstream.statusCode} ${upstream.statusMessage || ''}`.trimEnd()];
-            Object.entries(upstream.headers).forEach(([k, v]) => {
-                (Array.isArray(v) ? v : [v]).forEach(item => head.push(`${k}: ${item}`));
-            });
-            head.push('Connection: close');
-            socket.write(head.join('\r\n') + '\r\n\r\n');
+            // 缓冲完整响应体后按 Content-Length 回写：
+            // Node 已解掉 chunked 帧，若原样透传 transfer-encoding 头会让浏览器按分帧解析而报
+            // "Invalid character in chunk size"
+            const chunks = [];
             let size = 0;
-            upstream.on('data', c => { size += c.length; if (!socket.destroyed) socket.write(c); });
+            upstream.on('data', c => { size += c.length; if (size <= MAX_BODY_BYTES) chunks.push(c); });
             upstream.on('end', () => {
-                if (!socket.destroyed) socket.end();
+                const body = Buffer.concat(chunks);
+                const head = [`HTTP/1.1 ${upstream.statusCode} ${upstream.statusMessage || ''}`.trimEnd()];
+                Object.entries(upstream.headers).forEach(([k, v]) => {
+                    if (['transfer-encoding', 'connection', 'content-length'].includes(k)) return;
+                    (Array.isArray(v) ? v : [v]).forEach(item => head.push(`${k}: ${item}`));
+                });
+                head.push(`Content-Length: ${body.length}`);
+                head.push('Connection: close');
+                if (!socket.destroyed) {
+                    socket.write(head.join('\r\n') + '\r\n\r\n');
+                    socket.write(body);
+                    socket.end();
+                }
                 resolve({ status: upstream.statusCode, durationMs: Date.now() - startedAt, sizeBytes: size });
             });
             upstream.on('error', () => { if (!socket.destroyed) socket.destroy(); resolve({ result: 'upstream-error' }); });
@@ -271,18 +383,19 @@ function handleHttpOnSocket(socket, firstReq) {
                 remote: (socket.remoteAddress || '') + ':' + (socket.remotePort || '')
             };
             const record = { id: store.uid('pk_'), kind: 'http', at: store.nowText(), ...base };
+            const procP = resolveProc(socket.remotePort);
 
             if (proxy.breakpoints) {
                 decision = await holdForBreakpoint(socket, record);
                 if (decision && decision.action === 'drop') {
                     if (!socket.destroyed) socket.end();
-                    logPacket({ ...record, result: 'breakpoint-drop' });
+                    logPacket({ ...record, proc: await procP, result: 'breakpoint-drop' });
                     return;
                 }
             }
             const outgoing = (decision && decision.modified) ? { ...base, ...decision.modified } : base;
             const result = await forwardToClient(socket, outgoing);
-            logPacket({ ...record, ...result, result: result.result || 'forwarded' });
+            logPacket({ ...record, ...result, proc: await procP, result: result.result || 'forwarded' });
         });
     };
     processRequest(firstReq);
@@ -301,10 +414,12 @@ function handleConnect(req, clientSocket, head) {
             status: ok ? 'tunnel' : 'error', message: message || '',
             durationMs: Date.now() - startedAt
         });
-        pushEvent('packet', {
-            id: store.uid('pk_'), kind: 'connect', at: store.nowText(),
-            method: 'CONNECT', url: `${host}:${port}`,
-            result: ok ? 'tunnel' : 'error', message: message || ''
+        resolveProc(clientSocket.remotePort).then(proc => {
+            pushEvent('packet', {
+                id: store.uid('pk_'), kind: 'connect', at: store.nowText(), proc,
+                method: 'CONNECT', url: `${host}:${port}`,
+                result: ok ? 'tunnel' : 'error', message: message || ''
+            });
         });
     };
     if (!proxy.httpsTunnel) {
@@ -365,6 +480,8 @@ function proxyStop() {
         proxy.server = null;
         proxy.port = 0;
     }
+    // 系统代理还接管着的话必须恢复，否则全局流量指向已关闭的端口
+    if (sysProxyPrev) sysProxy({ action: 'off' }).catch(() => { });
     return { ok: true };
 }
 
@@ -377,9 +494,16 @@ const proxyStatus = () => ({
     stats: { ...proxy.stats }
 });
 
+/** 运行中切换断点模式（启动后再拨开关也生效） */
+function proxySetBreakpoints(enabled) {
+    if (!proxy.server) return { ok: false, message: '代理未启动' };
+    proxy.breakpoints = !!enabled;
+    return { ok: true, breakpoints: proxy.breakpoints };
+}
+
 module.exports = {
     sendAndLog,
-    proxyStart, proxyStop, proxyStatus, resolveBreakpoint,
+    proxyStart, proxyStop, proxyStatus, proxySetBreakpoints, resolveBreakpoint, sysProxy,
     setEmitter: fn => { proxy.emitter = fn; },
     listHistory, clearHistory,
     listCases, saveCase, deleteCase

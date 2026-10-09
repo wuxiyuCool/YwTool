@@ -44,7 +44,23 @@ function setup(ipcMain) {
     });
 
     ipcMain.handle('netsec:proxy:status', () => netsec.proxyStatus());
+    ipcMain.handle('netsec:proxy:breakpoints', (e, enabled) => {
+        const res = netsec.proxySetBreakpoints(enabled);
+        if (res.ok) audit.write({ type: '操作', user: operator(), detail: `断点改包：${res.breakpoints ? '开' : '关'}` });
+        return res;
+    });
     ipcMain.handle('netsec:decision', (e, payload) => netsec.resolveBreakpoint(payload));
+
+    ipcMain.handle('netsec:sysproxy', async (e, payload) => {
+        const res = await netsec.sysProxy(payload);
+        if (res.ok && payload && payload.action !== 'status') {
+            audit.write({
+                type: '操作', user: operator(),
+                detail: payload.action === 'on' ? `接管系统代理 → 127.0.0.1:${res.server.split(':')[1]}` : '恢复系统代理设置'
+            });
+        }
+        return res;
+    });
 
     ipcMain.handle('netsec:cases:list', () => netsec.listCases());
     ipcMain.handle('netsec:case:save', (e, payload) => {

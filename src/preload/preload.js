@@ -49,10 +49,12 @@ const validChannels = [
     'accounts:list', 'accounts:save', 'accounts:delete', 'accounts:reveal',
     'accounts:reset', 'accounts:loginTest', 'accounts:policy:save',
 
-    // 安全运维 · 网络安全（请求重放 + 本地抓包代理）
-    'netsec:send', 'netsec:proxy:start', 'netsec:proxy:stop', 'netsec:proxy:status', 'netsec:decision',
+    // 安全运维 · 网络安全（请求重放 + 本地抓包代理 + 流量包分析）
+    'netsec:send', 'netsec:proxy:start', 'netsec:proxy:stop', 'netsec:proxy:status', 'netsec:proxy:breakpoints', 'netsec:decision',
     'netsec:cases:list', 'netsec:case:save', 'netsec:case:delete',
-    'netsec:history:list', 'netsec:history:clear',
+    'netsec:history:list', 'netsec:history:clear', 'netsec:sysproxy',
+    'pcap:open', 'pcap:list', 'pcap:detail', 'pcap:stream', 'pcap:close',
+    'pcap:tool', 'pcap:ifaces', 'pcap:live:start', 'pcap:live:stop',
 
     // 安全运维 · 信息安全（哈希 / 对称加解密 / HMAC·PBKDF2 / 压缩 / RSA / JWT / 二维码）
     'sec:hash', 'sec:cipher', 'sec:ciphers', 'sec:hmac', 'sec:pbkdf2', 'sec:codec', 'sec:rsa',
@@ -109,7 +111,7 @@ contextBridge.exposeInMainWorld('electron', {
 
     /** 主进程主动推送（任务执行进度、告警、菜单导航、AI 流式回复） */
     on: (channel, callback) => {
-        const pushChannels = ['task:progress', 'alert:new', 'schedule:progress', 'menu:navigate', 'ai:stream', 'ai:step', 'data:progress', 'netsec:packet', 'netsec:breakpoint', 'terminal:data', 'terminal:exit', 'ai:approval'];
+        const pushChannels = ['task:progress', 'alert:new', 'schedule:progress', 'menu:navigate', 'ai:stream', 'ai:step', 'data:progress', 'netsec:packet', 'netsec:breakpoint', 'terminal:data', 'terminal:exit', 'ai:approval', 'pcap:live'];
         if (!pushChannels.includes(channel)) return () => {};
         const listener = (event, payload) => callback(payload);
         ipcRenderer.on(channel, listener);

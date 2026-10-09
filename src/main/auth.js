@@ -52,8 +52,10 @@ const ADMIN_ONLY = new Set([
     // 数据集成（ETL）：批量写库与数据外流均属高危，仅管理员
     'db:etl:run', 'db:etl:tasks:save', 'db:etl:tasks:delete',
     // 网络安全工作台：外发请求 / 代理 / 断点改包均属高危操作，仅管理员
-    'netsec:send', 'netsec:proxy:start', 'netsec:proxy:stop', 'netsec:decision',
+    'netsec:send', 'netsec:proxy:start', 'netsec:proxy:stop', 'netsec:proxy:breakpoints', 'netsec:decision',
     'netsec:case:save', 'netsec:case:delete', 'netsec:history:clear',
+    // 系统代理接管影响全局流量出口；流量包可含敏感内容且实时抓包要起外部进程：均仅管理员
+    'netsec:sysproxy', 'pcap:open', 'pcap:live:start', 'pcap:live:stop',
     // 二维码解码会加载本地图片文件，生成可外发内容：按写操作对待，仅管理员
     'sec:qr:decode',
     // Agent 全局能力配置属高危：只有管理员能放开「本机命令 / SQL 执行」等开关

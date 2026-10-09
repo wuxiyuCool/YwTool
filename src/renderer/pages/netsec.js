@@ -14,6 +14,7 @@ const METHODS = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS'];
 const TABS = [
     { id: 'send', label: '请求构造' },
     { id: 'proxy', label: '抓包代理' },
+    { id: 'pcap', label: '流量分析' },
     { id: 'cases', label: '案例库' },
     { id: 'history', label: '历史' }
 ];
@@ -29,6 +30,13 @@ let bpQueue = [];
 let bpShowing = false;
 let unsubPacket = null;
 let unsubBp = null;
+let unsubLive = null;
+/* 流量分析状态 */
+let pcapAll = [];
+let pcapView = [];
+let pcapFirstTs = 0;
+let pcapSelected = 0;
+let liveOn = false;
 
 const statusBadge = st => {
     if (st === 'error' || st === 'dropped' || Number(st) >= 400) return `<span class="badge red">${esc(String(st))}</span>`;
@@ -83,8 +91,8 @@ function proxyPane() {
     return `
     <div class="pane" data-tab="proxy" style="display:none">
         <div class="alert info">
-            <span>把待调试应用的 HTTP(S) 代理指向 <strong class="mono">127.0.0.1:端口</strong> 即可捕获流量。
-            明文 HTTP 可断点改包重放；HTTPS 仅建立隧道（记录域名与字节数，不解密内容）。</span>
+            <span>把待调试应用的 HTTP(S) 代理指向 <strong class="mono">127.0.0.1:端口</strong> 即可捕获流量（或打开「接管系统代理」让全局 WinINET 流量进来）。
+            明文 HTTP 可断点改包重放；HTTPS 仅建立隧道（记录域名与字节数，不解密内容）。请求已标注发起进程。</span>
         </div>
         <div class="toolbar">
             <label class="muted" style="font-size:12.5px">端口</label>
@@ -93,6 +101,10 @@ function proxyPane() {
                 <input type="checkbox" id="np-breakpoints"><span class="track"></span>
             </label>
             <span class="muted" style="font-size:12.5px">断点改包</span>
+            <label class="switch" title="写入 HKCU 注册表把系统代理指向本代理（无需管理员）；停止代理或关闭开关时自动恢复">
+                <input type="checkbox" id="np-sysproxy"><span class="track"></span>
+            </label>
+            <span class="muted" style="font-size:12.5px">接管系统代理</span>
             <button class="btn btn-primary btn-sm" data-write id="np-start">启动代理</button>
             <button class="btn btn-ghost btn-sm" id="np-stop" disabled>停止</button>
             <div class="spacer"></div>
@@ -101,9 +113,39 @@ function proxyPane() {
         </div>
         <div class="table-wrap" style="max-height:440px;overflow:auto">
             <table class="table">
-                <thead><tr><th style="width:130px">时间</th><th style="width:70px">方法</th><th>URL / 域名</th><th style="width:80px">状态</th><th style="width:80px">耗时</th><th style="width:90px">大小</th></tr></thead>
-                <tbody id="np-tbody">${emptyRow(6, '代理未启动')}</tbody>
+                <thead><tr><th style="width:120px">时间</th><th style="width:64px">方法</th><th>URL / 域名</th><th style="width:72px">状态</th><th style="width:64px">耗时</th><th style="width:80px">大小</th><th style="width:130px">进程</th></tr></thead>
+                <tbody id="np-tbody">${emptyRow(7, '代理未启动')}</tbody>
             </table>
+        </div>
+    </div>`;
+}
+
+function trafficPane() {
+    return `
+    <div class="pane" data-tab="pcap" style="display:none">
+        <div class="toolbar">
+            <button class="btn btn-primary btn-sm" data-write id="na-open" title="解析本地 .pcap/.pcapng 文件">打开流量包</button>
+            <select class="select" id="na-iface" style="width:230px" title="实时抓包网卡"></select>
+            <button class="btn btn-ghost btn-sm" data-write id="na-live">实时抓包</button>
+            <input class="input mono" id="na-filter" placeholder="显示过滤：http / tcp / dns / ip.addr=10.0.0.9 / port=8080 / 关键字" style="flex:1;min-width:200px">
+            <span class="muted" id="na-stats" style="font-size:12px;white-space:nowrap"></span>
+        </div>
+        <div class="alert info" id="na-hint" style="display:none;margin-top:0"></div>
+        <div class="na-split">
+            <div class="table-wrap na-list">
+                <table class="table">
+                    <thead><tr><th style="width:56px">No.</th><th style="width:100px">时间</th><th style="width:120px">源</th><th style="width:120px">目的</th><th style="width:56px">协议</th><th style="width:60px">长度</th><th>信息</th></tr></thead>
+                    <tbody id="na-tbody">${emptyRow(7, '打开 .pcap/.pcapng 流量包，或选择网卡启动实时抓包')}</tbody>
+                </table>
+            </div>
+            <div class="na-detail">
+                <div class="toolbar" style="margin:0 0 6px">
+                    <span class="muted" id="na-detail-title" style="font-size:12px;margin-right:auto">选中报文查看协议树与十六进制</span>
+                    <button class="btn btn-ghost btn-sm" id="na-follow" disabled>跟踪 TCP 流</button>
+                </div>
+                <div class="na-tree" id="na-tree"></div>
+                <pre class="code-output na-hex" id="na-hex"></pre>
+            </div>
         </div>
     </div>`;
 }
@@ -149,7 +191,29 @@ export function render() {
         <div class="tabs" id="ns-tabs">
             ${TABS.map(t => `<div class="tab ${t.id === currentTab ? 'active' : ''}" data-tab="${t.id}">${t.label}</div>`).join('')}
         </div>
-        ${sendPane()}${proxyPane()}${casesPane()}${historyPane()}
+        ${sendPane()}${proxyPane()}${trafficPane()}${casesPane()}${historyPane()}
+    </div>
+    <div class="modal-mask" id="stream-modal">
+        <div class="modal" style="width:860px;max-width:94vw">
+            <div class="modal-header">
+                <h3 id="sm-title">TCP 流</h3>
+                <button class="modal-close" data-sm-close>×</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-item">
+                    <label id="sm-label-a">A →</label>
+                    <pre class="code-output" id="sm-text-a" style="max-height:220px;overflow:auto"></pre>
+                </div>
+                <div class="form-item">
+                    <label id="sm-label-b">← B</label>
+                    <pre class="code-output" id="sm-text-b" style="max-height:220px;overflow:auto"></pre>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <div class="spacer"></div>
+                <button class="btn btn-ghost" data-sm-close>关闭</button>
+            </div>
+        </div>
     </div>
     <div class="modal-mask" id="curl-modal">
         <div class="modal" style="width:680px;max-width:94vw">
@@ -498,7 +562,132 @@ function paintPackets() {
             <td>${statusBadge(p.status || p.result || '')}</td>
             <td class="muted">${esc(p.durationMs || '')} ms</td>
             <td class="muted">${p.sizeBytes ? esc((p.sizeBytes / 1024).toFixed(1)) + ' KB' : '-'}</td>
-        </tr>`).join('') : emptyRow(6, '等待流量...');
+            <td class="muted" style="font-size:11.5px" title="${p.proc ? 'PID ' + p.proc.pid : ''}">${esc(p.proc ? p.proc.name.replace(/\.exe$/i, '') : '-')}</td>
+        </tr>`).join('') : emptyRow(7, '等待流量...');
+}
+
+/* ---------------- 流量分析（类 Wireshark） ---------------- */
+
+const PROTO_BADGE = { HTTP: 'green', DNS: 'blue', TLS: 'purple', TCP: 'gray', UDP: 'gray', ARP: 'amber', ICMP: 'amber' };
+const fmtClock = ts => {
+    if (!ts) return '';
+    const d = new Date(ts);
+    const p = (n, w) => String(n).padStart(w, '0');
+    return `${p(d.getHours(), 2)}:${p(d.getMinutes(), 2)}:${p(d.getSeconds(), 2)}.${p(d.getMilliseconds(), 3)}`;
+};
+
+function matchPcapFilter(p, tokens) {
+    return tokens.every(tok => {
+        if (tok === 'tcp' || tok === 'udp' || tok === 'http' || tok === 'dns' || tok === 'tls' || tok === 'arp' || tok === 'icmp') {
+            return p.proto.toLowerCase() === tok;
+        }
+        let m = /^ip\.addr=(.+)$/i.exec(tok);
+        if (m) return p.src.includes(m[1]) || p.dst.includes(m[1]);
+        m = /^port=(\d+)$/i.exec(tok);
+        if (m) return (p.info || '').includes(':' + m[1]) || (p.info || '').includes(m[1] + ' ') || p.src.endsWith(':' + m[1]) || p.dst.endsWith(':' + m[1]) || (p.info || '').includes(m[1] + '→') || (p.info || '').includes('→' + m[1]);
+        m = /^len>(\d+)$/i.exec(tok);
+        if (m) return p.len > Number(m[1]);
+        const hay = `${p.src} ${p.dst} ${p.proto} ${p.info}`.toLowerCase();
+        return hay.includes(tok.toLowerCase());
+    });
+}
+
+function renderPcapRows() {
+    const tbody = root.querySelector('#na-tbody');
+    const shown = pcapView.slice(0, 3000);
+    tbody.innerHTML = shown.length ? shown.map(p => `
+        <tr data-no="${p.no}" class="${p.no === pcapSelected ? 'na-sel' : ''}">
+            <td class="muted">${p.no}</td>
+            <td class="mono" style="font-size:11.5px">${fmtClock(p.ts)}</td>
+            <td class="mono" style="font-size:11.5px;word-break:break-all">${esc(p.src)}</td>
+            <td class="mono" style="font-size:11.5px;word-break:break-all">${esc(p.dst)}</td>
+            <td><span class="badge ${PROTO_BADGE[p.proto] || 'gray'}">${esc(p.proto)}</span></td>
+            <td class="muted">${p.len}</td>
+            <td class="mono" style="font-size:11.5px;word-break:break-all">${esc(p.info)}</td>
+        </tr>`).join('') : emptyRow(7, pcapAll.length ? '无匹配报文' : '打开 .pcap/.pcapng 流量包，或选择网卡启动实时抓包');
+    const more = pcapView.length > 3000 ? `（仅显示前 3000 / 命中 ${pcapView.length}）` : '';
+    root.querySelector('#na-stats').textContent = pcapAll.length
+        ? `${pcapAll.length} 报文${more ? ' ' + more : ''}` : '';
+}
+
+function applyPcapFilter() {
+    const text = (root.querySelector('#na-filter').value || '').trim().toLowerCase();
+    const tokens = text.split(/\s+and\s+|\s+/).filter(Boolean);
+    pcapView = tokens.length ? pcapAll.filter(p => matchPcapFilter(p, tokens)) : pcapAll.slice();
+    renderPcapRows();
+}
+
+async function refreshPcapList() {
+    const res = await api.pcap.list();
+    if (!res || !res.ok) { if (res && res.message && !/尚未/.test(res.message)) toast(res.message, 'warn'); return; }
+    pcapAll = res.packets || [];
+    pcapFirstTs = pcapAll.length ? pcapAll[0].ts : 0;
+    if (res.truncated) toast('报文过多，已截断解析（上限 5 万）', 'warn');
+    applyPcapFilter();
+}
+
+async function showPcapDetail(no) {
+    pcapSelected = no;
+    renderPcapRows();
+    const res = await api.pcap.detail(no);
+    if (!res || !res.ok) return;
+    root.querySelector('#na-detail-title').textContent = `No.${no} · ${res.meta.src} → ${res.meta.dst} · ${res.meta.proto}`;
+    root.querySelector('#na-tree').innerHTML = res.tree.map(layer => `
+        <div class="na-layer"><strong>${esc(layer.name)}</strong>
+            ${layer.fields.map(f => `<div class="na-field"><span>${esc(f.k)}</span><span class="mono">${esc(f.v)}</span></div>`).join('')}
+        </div>`).join('');
+    root.querySelector('#na-hex').textContent = res.hex;
+    root.querySelector('#na-follow').disabled = !(res.meta.flow || '').startsWith('T:');
+}
+
+async function followTcpStream() {
+    if (!pcapSelected) return;
+    const res = await api.pcap.stream(pcapSelected);
+    if (!res || !res.ok) { toast((res && res.message) || '跟踪失败', 'warn'); return; }
+    root.querySelector('#sm-title').textContent = `TCP 流 · ${res.a.from} ⇄ ${res.b.from}`;
+    root.querySelector('#sm-label-a').textContent = `${res.a.from} → ${res.a.to}（${res.a.bytes}B${res.a.capped ? ' 已截断' : ''}）`;
+    root.querySelector('#sm-label-b').textContent = `${res.b.from} → ${res.b.to}（${res.b.bytes}B${res.b.capped ? ' 已截断' : ''}）`;
+    root.querySelector('#sm-text-a').textContent = res.a.text || '(无数据)';
+    root.querySelector('#sm-text-b').textContent = res.b.text || '(无数据)';
+    root.querySelector('#stream-modal').classList.add('open');
+}
+
+async function toggleLive() {
+    if (!guardAdmin('实时抓包')) return;
+    if (liveOn) {
+        const res = await api.pcap.liveStop();
+        liveOn = false;
+        root.querySelector('#na-live').textContent = '实时抓包';
+        toast(`已停止抓包（共 ${res.count || 0} 报文）`, 'info');
+        refreshPcapList();
+        return;
+    }
+    const iface = root.querySelector('#na-iface').value;
+    const bpf = '';
+    const res = await api.pcap.liveStart({ iface: iface ? Number(iface) : undefined, bpf });
+    if (!res || !res.ok) { toast((res && res.message) || '启动失败', 'danger'); return; }
+    liveOn = true;
+    pcapAll = [];
+    renderPcapRows();
+    root.querySelector('#na-live').textContent = '停止抓包';
+    toast(`实时抓包已启动（${res.tool}，输出有数秒缓冲延迟）`, 'success');
+}
+
+async function initTrafficTab() {
+    try {
+        const tool = await api.pcap.tool();
+        const hint = root.querySelector('#na-hint');
+        if (tool && tool.ok && !tool.tool) {
+            hint.style.display = '';
+            hint.innerHTML = `<span>${esc(tool.hint)}</span>`;
+        }
+        const ifaces = await api.pcap.ifaces();
+        const sel = root.querySelector('#na-iface');
+        sel.innerHTML = (ifaces && ifaces.ok ? ifaces.ifaces : [])
+            .map(i => `<option value="${i.idx}">${esc(i.idx + '. ' + (i.desc || i.name).slice(0, 34))}</option>`).join('')
+            || '<option value="">无可用网卡</option>';
+    } catch (e) { /* 静默 */ }
+    refreshPcapList().catch(() => { });
 }
 
 async function refreshProxyStatus() {
@@ -599,6 +788,52 @@ export async function mount(r) {
     });
     root.querySelector('#np-clear').addEventListener('click', () => { packets = []; paintPackets(); });
 
+    /* 断点开关运行时切换（不必重启代理） */
+    root.querySelector('#np-breakpoints').addEventListener('change', async e => {
+        const on = e.target.checked;
+        if (!guardAdmin('切换断点模式')) { e.target.checked = !on; return; }
+        const res = await api.netsec.proxy.setBreakpoints(on);
+        if (!res || !res.ok) { e.target.checked = !on; toast((res && res.message) || '切换失败', 'warn'); return; }
+        toast(res.breakpoints ? '断点已开启：下一个明文 HTTP 请求将弹出改包窗口' : '断点已关闭：请求直接转发', 'info');
+    });
+
+    /* 系统代理接管 */
+    root.querySelector('#np-sysproxy').addEventListener('change', async e => {
+        const on = e.target.checked;
+        if (!guardAdmin('接管系统代理')) { e.target.checked = !on; return; }
+        const res = await api.netsec.sysproxy({ action: on ? 'on' : 'off' });
+        if (!res || !res.ok) { e.target.checked = !on; toast((res && res.message) || '操作失败', 'danger'); return; }
+        toast(on ? `系统代理已接管 → ${res.server}（${res.note || '部分应用需重启生效'}）` : '系统代理已恢复原设置', 'success');
+    });
+    api.netsec.sysproxy({ action: 'status' }).then(st => {
+        if (st && st.ok) root.querySelector('#np-sysproxy').checked = !!st.enabled;
+    }).catch(() => { });
+
+    /* 流量分析 */
+    root.querySelector('#na-open').addEventListener('click', async () => {
+        if (!guardAdmin('打开流量包')) return;
+        const res = await api.pcap.open();
+        if (!res || res.canceled) return;
+        if (res.ok) {
+            toast(`已解析 ${res.file}：${res.count} 报文 · 跨度 ${res.spanSec}s`, 'success');
+            await refreshPcapList();
+        } else {
+            toast(res.message, 'danger');
+        }
+    });
+    root.querySelector('#na-live').addEventListener('click', toggleLive);
+    root.querySelector('#na-filter').addEventListener('input', applyPcapFilter);
+    root.querySelector('#na-tbody').addEventListener('click', e => {
+        const tr = e.target.closest('tr[data-no]');
+        if (tr) showPcapDetail(Number(tr.dataset.no));
+    });
+    root.querySelector('#na-follow').addEventListener('click', followTcpStream);
+    root.querySelectorAll('#stream-modal [data-sm-close]').forEach(el =>
+        el.addEventListener('click', () => root.querySelector('#stream-modal').classList.remove('open')));
+    root.querySelector('#stream-modal').addEventListener('click', e => {
+        if (e.target === e.currentTarget) e.currentTarget.classList.remove('open');
+    });
+
     root.querySelector('#nc-tbody').addEventListener('click', async e => {
         const btn = e.target.closest('[data-act]');
         if (!btn) return;
@@ -635,6 +870,7 @@ export async function mount(r) {
     /* 实时推送订阅（重复 mount 时先退订） */
     if (unsubPacket) unsubPacket();
     if (unsubBp) unsubBp();
+    if (unsubLive) unsubLive();
     unsubPacket = api.netsec.onPacket(packet => {
         packets.unshift(packet);
         if (packets.length > 300) packets.length = 300;
@@ -645,7 +881,15 @@ export async function mount(r) {
         bpQueue.push(entry);
         showNextBreakpoint();
     });
+    unsubLive = api.pcap.onLive(entry => {
+        if (!entry) return;
+        if (entry.added && entry.added.length) {
+            pcapAll = pcapAll.concat(entry.added);
+            if (!pcapFirstTs) pcapFirstTs = pcapAll[0].ts;
+            if (currentTab === 'pcap') applyPcapFilter();
+        } else if (entry.finished && currentTab === 'pcap') applyPcapFilter();
+    });
 
-    await Promise.all([loadCases(), loadHistory(), refreshProxyStatus(), paintPackets()]);
+    await Promise.all([loadCases(), loadHistory(), refreshProxyStatus(), paintPackets(), initTrafficTab()]);
     applyReadonly(root);
 }

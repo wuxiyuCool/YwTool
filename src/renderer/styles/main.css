@@ -2059,6 +2059,68 @@ body.ai-resizing .ai-panel { transition: none; }
     gap: 10px;
 }
 
+/* 流量分析（类 Wireshark）：报文列表 + 协议树/十六进制 双栏 */
+.na-split {
+    display: flex;
+    gap: 12px;
+    align-items: stretch;
+    margin-top: 4px;
+    min-height: 420px;
+}
+
+.na-list {
+    flex: 1 1 56%;
+    min-width: 0;
+    max-height: 480px;
+    overflow: auto;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+}
+
+.na-detail {
+    flex: 1 1 44%;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+.na-list .table { font-size: 12px; }
+.na-list .table thead th { position: sticky; top: 0; z-index: 1; background: #f6f8ff; }
+
+.na-list tr[data-no] { cursor: pointer; }
+.na-list tr.na-sel td { background: var(--primary-soft); }
+
+.na-tree {
+    flex: 1;
+    overflow: auto;
+    max-height: 260px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: #fbfcff;
+    padding: 8px 10px;
+    font-size: 12px;
+}
+
+.na-layer + .na-layer { margin-top: 6px; border-top: 1px dashed #e6eaf5; padding-top: 6px; }
+.na-layer > strong { font-size: 12px; color: var(--text-2); }
+
+.na-field {
+    display: flex;
+    gap: 10px;
+    padding: 1px 0 1px 12px;
+}
+
+.na-field span:first-child { color: var(--text-3); min-width: 90px; }
+
+.na-hex {
+    margin-top: 8px !important;
+    max-height: 190px;
+    overflow: auto;
+    font-size: 11px;
+    line-height: 1.5;
+    white-space: pre;
+}
+
 /* 消息级操作行（保存为脚本 / 复制）与行内保存表单 */
 .ai-msg-actions { display: flex; gap: 6px; margin-top: 6px; }
 

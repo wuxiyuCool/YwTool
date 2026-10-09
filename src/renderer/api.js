@@ -187,8 +187,17 @@ function demoFallback(channel, data) {
         case 'ledger:unlock': return { ok: false, message: '演示模式不支持台账解锁' };
         case 'ledger:lock': return { ok: true };
         case 'netsec:proxy:status': return { running: false, port: 0, breakpoints: false, httpsTunnel: true, pendingBreakpoints: 0, stats: { requests: 0, tunnels: 0, bytes: 0 } };
+        case 'netsec:proxy:breakpoints': return { ok: false, message: '演示模式代理不可用' };
         case 'netsec:cases:list': return [{ id: 'api_demo1', name: '示例：本机健康检查', method: 'GET', url: 'http://127.0.0.1:8080/health', headers: '{}', body: '' }];
         case 'netsec:history:list': return [];
+        case 'netsec:sysproxy': return { ok: true, enabled: false, server: '', message: '演示模式不操作系统代理' };
+        case 'pcap:tool': return { ok: true, tool: null, hint: '演示模式：实时抓包需在应用内使用' };
+        case 'pcap:list': return { ok: false, message: '演示模式无法打开本地流量包，请在应用内（npm start）使用' };
+        case 'pcap:open': return { ok: false, message: '演示模式不支持选择本地文件' };
+        case 'pcap:ifaces': return { ok: false, message: '演示模式无法枚举网卡' };
+        case 'pcap:live:start': return { ok: false, message: '演示模式无法实时抓包' };
+        case 'pcap:live:stop': return { ok: true, count: 0 };
+        case 'pcap:close': return { ok: true };
         case 'sec:ciphers':
             return ['AES-128-CBC', 'AES-192-CBC', 'AES-256-CBC', 'AES-128-ECB', 'AES-192-ECB', 'AES-256-ECB', 'AES-128-CTR', 'AES-256-CTR', 'AES-256-GCM', '3DES-CBC', 'RC4'];
         case 'dashboard:overview': return {
@@ -544,7 +553,8 @@ export const api = {
         proxy: {
             start: options => invoke('netsec:proxy:start', options),
             stop: () => invoke('netsec:proxy:stop'),
-            status: () => invoke('netsec:proxy:status')
+            status: () => invoke('netsec:proxy:status'),
+            setBreakpoints: enabled => invoke('netsec:proxy:breakpoints', !!enabled)
         },
         decision: payload => invoke('netsec:decision', payload),
         cases: {
@@ -554,6 +564,8 @@ export const api = {
         },
         history: (limit = 200) => invoke('netsec:history:list', limit),
         clearHistory: () => invoke('netsec:history:clear'),
+        /** 系统代理接管：{ action: 'on' | 'off' | 'status' } */
+        sysproxy: payload => invoke('netsec:sysproxy', payload),
         /** 抓包流水推送（主进程 → 渲染进程） */
         onPacket: callback => {
             if (demoMode || typeof bridge.on !== 'function') return () => {};
@@ -563,6 +575,24 @@ export const api = {
         onBreakpoint: callback => {
             if (demoMode || typeof bridge.on !== 'function') return () => {};
             return bridge.on('netsec:breakpoint', callback);
+        }
+    },
+
+    /** 安全运维 · 流量分析：pcap/pcapng 文件解析 + tshark 实时抓包（类 Wireshark） */
+    pcap: {
+        open: () => invoke('pcap:open'),
+        list: () => invoke('pcap:list'),
+        detail: no => invoke('pcap:detail', no),
+        stream: no => invoke('pcap:stream', no),
+        close: () => invoke('pcap:close'),
+        tool: () => invoke('pcap:tool'),
+        ifaces: () => invoke('pcap:ifaces'),
+        liveStart: options => invoke('pcap:live:start', options),
+        liveStop: () => invoke('pcap:live:stop'),
+        /** 实时抓包新增报文推送 */
+        onLive: callback => {
+            if (demoMode || typeof bridge.on !== 'function') return () => {};
+            return bridge.on('pcap:live', callback);
         }
     },
 

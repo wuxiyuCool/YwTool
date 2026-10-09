@@ -81,6 +81,7 @@ const CHANNEL_RULES = [
 
     // 安全运维
     ['netsec:*', 'netsec'],
+    ['pcap:*', 'netsec'],
     ['sec:*', 'infosec'],
 
     // 系统运维
