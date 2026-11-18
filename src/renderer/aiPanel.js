@@ -4,7 +4,8 @@
  * 相比旧版悬浮抽屉的升级点：
  *   1. 常驻工作台：侧边栏渐变入口卡 + Shift+A 唤起，与主内容并排而非遮挡
  *   2. 上下文感知：自动携带当前页面（router.setPage 注入）与选中对象
- *      （如脚本管理页 setTarget 注入的脚本），以系统消息随提问发出，不落历史
+ *      （如脚本管理页 setTarget 注入的脚本），Agent 模式另附已打开终端会话清单，
+ *      以系统消息随提问发出，不落历史
  *   3. 会话管理：多会话切换 / 新建 / 删除（ai:sessions:*），清空走面板内
  *      二次确认条，替代原生 confirm
  *   4. 场景化快捷指令：巡检排障 / 生成脚本 / 优化脚本 / 解读日志
@@ -21,6 +22,7 @@ let entryEl = null;
 let chatEl = null;
 let inputEl = null;
 let sendBtn = null;
+let stopBtn = null;         // 停止生成按钮
 let quickEl = null;
 let ctxEl = null;
 let ctxTextEl = null;
@@ -28,7 +30,8 @@ let sessionsPopEl = null;
 let sessionsListEl = null;
 let confirmEl = null;
 let modelTagEl = null;
-let modelSelEl = null;      // 模型切换下拉
+let modelInputEl = null;    // 模型切换输入（自填，无预设）
+let profileSelEl = null;    // 模型档案切换下拉
 let roleSelEl = null;       // 提示词角色下拉
 let currentRole = '';
 let agentSwitchEl = null;   // Agent 开关
@@ -129,11 +132,13 @@ function paintEmpty() {
 }
 
 function appendMessage(role, text, { streaming = false } = {}) {
-    const el = bubble(role, text, { withActions: role === 'assistant' && !streaming && hasCode(text) });
+    const el = bubble(role, streaming ? '' : text, { withActions: role === 'assistant' && !streaming && hasCode(text) });
     chatEl.appendChild(el);
     if (streaming) {
         streamingEl = el;
-        streamingRaw = text;
+        streamingRaw = '';
+        // 模型首包/工具调用前可能静默数秒到一分钟，先给可见反馈，避免误以为无响应
+        el.querySelector('.ai-msg-bubble').innerHTML = '<span class="muted">思考中…（Agent 模式含工具调用与网络等待，最长 60 秒）</span>';
     }
     chatEl.scrollTop = chatEl.scrollHeight;
     return el;
@@ -207,7 +212,8 @@ function renderStep(payload) {
     el.classList.add(ok ? 'ok' : 'fail');
     const result = payload.result || {};
     const detail = ok
-        ? (result.rowCount !== undefined ? `${result.rowCount} 行` : (result.scriptId ? `${result.name} ${result.version}` : '完成'))
+        ? (result.exitCode !== undefined && result.exitCode !== null && result.exitCode !== 0 ? `完成 · exit ${result.exitCode}`
+            : result.rowCount !== undefined ? `${result.rowCount} 行` : (result.scriptId ? `${result.name} ${result.version}` : '完成'))
         : (result.error || '失败');
     el.querySelector('.ai-step-status').textContent = detail;
     chatEl.scrollTop = chatEl.scrollHeight;
@@ -239,7 +245,7 @@ function paintContext() {
 }
 
 /** 组装随提问发送的上下文（system 消息，不落本地历史与存储） */
-function buildPreamble() {
+async function buildPreamble() {
     const lines = [];
     if (context) {
         const where = [context.domainLabel, context.pageLabel].filter(Boolean).join(' › ');
@@ -250,6 +256,18 @@ function buildPreamble() {
         lines.push('```' + (target.type === 'python' ? 'python' : 'bash'));
         lines.push(target.content);
         lines.push('```');
+    }
+    // Agent 模式带上已打开的终端会话：模型无需先调 list_terminals 就知道可复用的排障现场
+    if (agentEnabled) {
+        const t = await api.terminal.list().catch(() => null);
+        const sessions = t && t.ok && Array.isArray(t.sessions) ? t.sessions : [];
+        if (sessions.length) {
+            lines.push(`【当前终端会话】${sessions.map(s => {
+                const where = s.currentHost ? `，当前 shell=${s.currentHost}${(s.currentIps || []).length ? '/' + s.currentIps[0] : ''}（最近探测，可能已 ssh 跳转）` : '';
+                return `${s.hostName}（sessionId=${s.sessionId}，空闲 ${Math.round((s.idleMs || 0) / 1000)}s${where}）`;
+            }).join('；')}`);
+            lines.push('远程命令优先用 terminal_run 复用以上会话（延续用户当前目录与环境），不要新建 SSH 连接；会话当前 shell 与建连主机不同时，以 currentHost 为实际执行主机。');
+        }
     }
     if (!lines.length) return '';
     lines.push('请结合以上界面上下文回答用户问题；给出的命令与脚本需可直接复制执行。');
@@ -303,12 +321,13 @@ async function send() {
     sending = true;
     sendBtn.disabled = true;
     sendBtn.textContent = '生成中…';
+    if (stopBtn) stopBtn.style.display = '';
     appendMessage('assistant', '', { streaming: true });
 
     try {
         // 上下文以 system 消息随本次请求发出（不进入本地历史与存储）
         const outbound = [];
-        const pre = buildPreamble();
+        const pre = await buildPreamble();
         if (pre) outbound.push({ role: 'system', content: pre });
         outbound.push(...history, { role: 'user', content: text });
 
@@ -317,6 +336,11 @@ async function send() {
         if (res && res.ok) {
             messages = messages.concat([{ role: 'assistant', content: res.text }]);
             if (streamingEl) finalizeStreaming(res.text);
+        } else if (res && res.aborted) {
+            const partial = streamingRaw;
+            messages = messages.concat([{ role: 'assistant', content: partial || '（已停止生成）' }]);
+            if (streamingEl) finalizeStreaming(partial ? `${partial}\n\n*（已停止生成）*` : '已停止生成');
+            toast('已停止生成', 'info');
         } else {
             const tip = `⚠️ ${(res && res.message) || 'AI 请求失败'}`;
             if (streamingEl) {
@@ -339,7 +363,18 @@ async function send() {
         sending = false;
         sendBtn.disabled = false;
         sendBtn.textContent = '发送';
+        if (stopBtn) stopBtn.style.display = 'none';
     }
+}
+
+/** 停止当前生成：中止主进程 fetch 与 Agent 循环，保留已输出的部分内容 */
+async function stopGeneration() {
+    if (!sending) return;
+    if (stopBtn) { stopBtn.disabled = true; stopBtn.textContent = '停止中…'; }
+    try {
+        await api.ai.chatAbort();
+    } catch (err) { /* 主进程会在对话结束时统一收尾 */ }
+    if (stopBtn) { stopBtn.disabled = false; stopBtn.textContent = '停止'; }
 }
 
 async function loadHistory() {
@@ -552,6 +587,7 @@ function toggle(force) {
         hideSessionsPop();
         inputEl.focus();
         if (!loaded) { loaded = true; loadHistory(); }
+        loadModels();
     }
 }
 
@@ -572,24 +608,25 @@ async function loadRoles() {
     } catch (err) { /* 静默：角色为增强能力 */ }
 }
 
-/** 渲染模型下拉：按提供方分组，含当前生效模型 */
+/** 渲染模型切换：档案下拉 + 自填模型名输入，标签显示当前协议 */
 function paintModels(info) {
-    if (!modelSelEl) return;
     const current = info.model || info.defaultModel || '';
-    const groups = [];
-    (info.providers || []).forEach(p => {
-        const models = [].concat(p.models || [], p.model ? [p.model] : []);
-        const unique = [...new Set(models.filter(Boolean))];
-        if (unique.length) groups.push({ label: p.label, models: unique });
-    });
-    // 生效模型不在预设清单里（自定义模型）也补一项，避免下拉显示错乱
-    if (current && !groups.some(g => g.models.includes(current))) {
-        groups.unshift({ label: '当前生效', models: [current] });
+    if (modelInputEl) {
+        modelInputEl.value = current;
+        modelInputEl.title = `当前模型：${current || '未配置'}（回车切换，仅影响本人会话）`;
     }
-    modelSelEl.innerHTML = groups.map(g =>
-        `<optgroup label="${esc(g.label)}">${g.models.map(m =>
-            `<option value="${esc(m)}"${m === current ? ' selected' : ''}>${esc(m)}</option>`).join('')}</optgroup>`).join('');
-    modelSelEl.title = `当前模型：${current}`;
+    if (profileSelEl) {
+        const profiles = info.profiles || [];
+        const selected = info.profileId || info.defaultProfileId || '';
+        profileSelEl.innerHTML = profiles.length
+            ? profiles.map(p => `<option value="${esc(p.id)}"${p.id === selected ? ' selected' : ''}>${esc(p.name)}${p.id === info.defaultProfileId ? '（默认）' : ''}</option>`).join('')
+            : '<option value="">默认配置</option>';
+        profileSelEl.title = profiles.length ? '切换模型档案（仅影响本人会话，在「AI 配置」页维护）' : '尚无模型档案，请到「AI 配置」添加';
+    }
+    if (modelTagEl) {
+        modelTagEl.textContent = info.label || (info.protocol === 'anthropic' ? 'Anthropic' : 'OpenAI 兼容');
+        modelTagEl.style.display = '';
+    }
 }
 
 async function loadModels() {
@@ -597,20 +634,17 @@ async function loadModels() {
         const res = await api.ai.model.get();
         if (!res || !res.ok) return;
         paintModels(res);
-        if (modelTagEl && res.provider) {
-            const provider = (res.providers || []).find(p => p.id === res.provider);
-            modelTagEl.textContent = (provider && provider.label) || res.provider;
-            modelTagEl.style.display = '';
-        }
     } catch (err) { /* 静默：仅为辅助展示 */ }
 }
 
 async function switchModel(model) {
+    const name = String(model || '').trim();
+    if (!name) { toast('模型名不能为空', 'warn'); await loadModels(); return; }
     try {
-        const res = await api.ai.model.save(model);
+        const res = await api.ai.model.save(name);
         if (res && res.ok) {
-            if (modelTagEl) modelTagEl.textContent = model;
-            toast(`已切换到模型 ${model}`, 'success');
+            if (modelInputEl) modelInputEl.value = res.model || name;
+            toast(`已切换到模型 ${name}`, 'success');
         } else {
             toast((res && res.message) || '模型切换失败', 'warn');
             await loadModels();
@@ -619,6 +653,21 @@ async function switchModel(model) {
         toast('模型切换失败：' + err.message, 'danger');
         await loadModels();
     }
+}
+
+/** 切换本人使用的模型档案（服务端会清掉旧档案下的模型名覆盖） */
+async function switchProfile(id) {
+    try {
+        const res = await api.ai.profileUse(id);
+        if (res && res.ok) {
+            toast(`已切换模型档案${res.model ? ` · ${res.model}` : ''}`, 'success');
+        } else {
+            toast((res && res.message) || '档案切换失败', 'warn');
+        }
+    } catch (err) {
+        toast('档案切换失败：' + err.message, 'danger');
+    }
+    await loadModels();
 }
 
 async function loadAgent() {
@@ -644,7 +693,7 @@ function paintAgent() {
     if (agentWrapEl) {
         agentWrapEl.classList.toggle('disabled', !agentSupported);
         agentWrapEl.title = agentSupported
-            ? 'Agent 已可用：AI 可调用平台工具完成任务（查询主机 / 生成数据 / 保存脚本 / 执行命令 / 查询数据源）'
+            ? 'Agent 已可用：AI 可调用平台工具完成任务（查询主机 / 数据源与表结构 / 生成数据 / 保存脚本 / 远程与终端执行 / 查询容器 / 流量包与代理流水分析）'
             : 'Agent 总开关未开启，请联系系统管理员在「系统运维 → AI 配置」中启用';
     }
 }
@@ -804,7 +853,14 @@ function cancelPendingApprovals() {
 
 function bindEvents() {
     sendBtn.addEventListener('click', send);
-    if (modelSelEl) modelSelEl.addEventListener('change', () => switchModel(modelSelEl.value));
+    if (stopBtn) stopBtn.addEventListener('click', stopGeneration);
+    if (modelInputEl) {
+        modelInputEl.addEventListener('change', () => switchModel(modelInputEl.value));
+        modelInputEl.addEventListener('keydown', e => {
+            if (e.key === 'Enter') { e.preventDefault(); switchModel(modelInputEl.value); modelInputEl.blur(); }
+        });
+    }
+    if (profileSelEl) profileSelEl.addEventListener('change', () => switchProfile(profileSelEl.value));
     if (roleSelEl) roleSelEl.addEventListener('change', async () => {
         currentRole = roleSelEl.value;
         api.ai.roles.select(currentRole).catch(() => { });
@@ -926,7 +982,11 @@ function bindEvents() {
 
     // 流式订阅（仅订阅一次）
     if (typeof api.onAiStream === 'function' && !unsubStream) {
-        unsubStream = api.onAiStream(({ delta }) => { if (delta) updateStreaming(delta); });
+        unsubStream = api.onAiStream(payload => {
+            if (!payload) return;
+            if (payload.retry) { toast('网络瞬时波动，正在自动重试…', 'warn'); return; }
+            if (payload.delta) updateStreaming(payload.delta);
+        });
     }
     // Agent 工具执行轨迹订阅
     if (typeof api.onAiStep === 'function' && !unsubStep) {
@@ -1017,6 +1077,7 @@ export function init() {
     chatEl = panel.querySelector('#ai-chat');
     inputEl = panel.querySelector('#ai-input');
     sendBtn = panel.querySelector('#ai-send');
+    stopBtn = panel.querySelector('#ai-stop');
     quickEl = panel.querySelector('#ai-quick');
     ctxEl = panel.querySelector('#ai-context');
     ctxTextEl = panel.querySelector('#ai-context-text');
@@ -1024,7 +1085,8 @@ export function init() {
     sessionsListEl = panel.querySelector('#ai-sessions-list');
     confirmEl = panel.querySelector('#ai-confirm');
     modelTagEl = panel.querySelector('#ai-model-tag');
-    modelSelEl = panel.querySelector('#ai-model-select');
+    modelInputEl = panel.querySelector('#ai-model-input');
+    profileSelEl = panel.querySelector('#ai-profile-switch');
     roleSelEl = panel.querySelector('#ai-role-select');
     agentSwitchEl = panel.querySelector('#ai-agent-switch');
     agentWrapEl = panel.querySelector('#ai-agent-wrap');
@@ -1037,6 +1099,8 @@ export function init() {
     resizerEl = panel.querySelector('#ai-resizer');
 
     bindEvents();
+    // 配置页增删/启用档案后即时同步面板下拉（面板常驻，不会重新 init）
+    window.addEventListener('sgops:ai-profiles-changed', () => loadModels());
     paintQuick();
     paintContext();
     paintAgent();

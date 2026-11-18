@@ -1,19 +1,22 @@
 /**
- * AI 适配层 · 多模型注册表 + Agent 引擎
+ * AI 适配层 · 双协议接入 + Agent 引擎
  * ------------------------------------------------------------------
- * 统一契约（OpenAI 兼容 chat/completions）：
- *   默认地址  {baseURL}/chat/completions
- *   鉴权      Authorization: Bearer <apiKey>
- *   流式      stream: true → SSE（data: 行 + [DONE]）
- *   工具调用  tools[] + tool_calls（function calling，用于 Agent 模式）
+ * 只保留两种协议，地址 / 模型 / Key 全部由用户自填（不再内置提供方预设）：
+ *   openai    OpenAI 兼容：POST {baseURL}/chat/completions · Bearer 鉴权
+ *             流式 SSE（data: 行 + [DONE]）· tools[] + tool_calls
+ *   anthropic Anthropic：POST {baseURL}/v1/messages · x-api-key + anthropic-version
+ *             流式 SSE（content_block_delta/text_delta）· tools[] + tool_use/tool_result
  *
- * 扩展方式：在 PROVIDERS 中追加一条 { id, label, baseURL, model, models }，
- *   配置界面与模型下拉会自动出现该提供方的预设模型；baseURL / model 均可被用户覆写。
+ * 两种协议在引擎内部归一化为同一套 OpenAI 形状的消息与响应
+ * （{content, tool_calls}），因此 Agent 循环 / 流式 UI 无需感知协议差异。
  *
  * 配置存储：
- *   db.aiConfig    = { provider, baseURL, apiKey(密文), model }  全局模型配置（管理员维护）
+ *   db.aiProfiles  = [{ id, name, protocol, baseURL, apiKey(密文), model }]  模型档案（可存多个，管理员维护）
+ *   db.aiConfig    = { protocol, baseURL, apiKey(密文), model, profileId }   全局默认配置（profileId 指向启用的档案）
  *   db.aiAgent     = { enabled, maxSteps, ... 能力开关 }          Agent 全局能力配置
- *   db.aiUserPrefs = { [username]: { model, agentEnabled } }     用户级偏好（模型切换 / 单次开关）
+ *   db.aiUserPrefs = { [username]: { model, profileId, agentEnabled } }  用户级偏好（档案/模型切换 / 单次开关）
+ *   老库的 provider 字段自动按 openai 协议迁移；已有单配置自动迁为首个模型档案，地址/模型/Key 原样保留。
+ *   生效顺序：用户偏好档案 > 全局默认档案 > 自定义 aiConfig（此时外置密钥文件优先注入）。
  *
  * 安全边界：
  *   - 模型与 Agent 全局门槛由管理员在「AI 配置」页设定
@@ -25,50 +28,22 @@ const { encrypt, decrypt, mask } = require('./crypto');
 const secrets = require('./secrets');
 const agentTools = require('./agentTools');
 
-/** 模型提供方注册表（每个提供方带预设模型，供下拉与配置页直接选用） */
-const PROVIDERS = [
-    {
-        id: 'deepseek', label: 'DeepSeek 深度求索', baseURL: 'https://api.deepseek.com',
-        model: 'deepseek-chat', models: ['deepseek-chat', 'deepseek-reasoner']
-    },
-    {
-        id: 'qwen', label: '通义千问（阿里云百炼）', baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-        model: 'qwen-plus', models: ['qwen-turbo', 'qwen-plus', 'qwen-max', 'qwen-long', 'qwen-coder-plus']
-    },
-    {
-        id: 'kimi', label: 'Kimi（Moonshot）', baseURL: 'https://api.moonshot.cn/v1',
-        model: 'moonshot-v1-8k', models: ['moonshot-v1-8k', 'moonshot-v1-32k', 'moonshot-v1-128k']
-    },
-    {
-        id: 'zhipu', label: '智谱 GLM', baseURL: 'https://open.bigmodel.cn/api/paas/v4',
-        model: 'glm-4-flash', models: ['glm-4-flash', 'glm-4-air', 'glm-4-plus', 'glm-4-long']
-    },
-    {
-        id: 'doubao', label: '豆包（火山方舟）', baseURL: 'https://ark.cn-beijing.volces.com/api/v3',
-        model: 'doubao-pro-32k', models: ['doubao-pro-32k', 'doubao-lite-32k', 'doubao-pro-128k']
-    },
-    {
-        id: 'siliconflow', label: '硅基流动 SiliconFlow', baseURL: 'https://api.siliconflow.cn/v1',
-        model: 'Qwen/Qwen2.5-7B-Instruct',
-        models: ['Qwen/Qwen2.5-7B-Instruct', 'Qwen/Qwen2.5-Coder-7B-Instruct', 'deepseek-ai/DeepSeek-V3', 'THUDM/glm-4-9b-chat']
-    },
-    {
-        id: 'openai', label: 'OpenAI', baseURL: 'https://api.openai.com/v1',
-        model: 'gpt-4o-mini', models: ['gpt-4o', 'gpt-4o-mini', 'gpt-4.1-mini', 'o3-mini']
-    },
-    {
-        id: 'ollama', label: 'Ollama（本地私有化）', baseURL: 'http://localhost:11434/v1',
-        model: 'llama3.1', models: ['llama3.1', 'qwen2.5', 'deepseek-r1:7b']
-    },
-    { id: 'custom', label: '自定义（OpenAI 兼容）', baseURL: '', model: '', models: [] }
+/** 协议注册表：仅两种，地址与模型由用户自填 */
+const PROTOCOLS = [
+    { id: 'openai', label: 'OpenAI 兼容', hint: 'DeepSeek / 通义 / Kimi / 智谱 / Ollama / vLLM 等绝大多数网关' },
+    { id: 'anthropic', label: 'Anthropic', hint: 'Claude 官方或兼容 /v1/messages 的网关' }
 ];
 
 const DEFAULT_CONFIG = {
-    provider: 'deepseek',
-    baseURL: 'https://api.deepseek.com',
+    protocol: 'openai',
+    baseURL: '',
     apiKey: '',
-    model: 'deepseek-chat'
+    model: ''
 };
+
+/** 协议归一：未知值一律回落 openai（兼容老库 provider 字段） */
+const normalizeProtocol = id => (String(id || '').trim() === 'anthropic' ? 'anthropic' : 'openai');
+const protocolLabel = id => (normalizeProtocol(id) === 'anthropic' ? 'Anthropic' : 'OpenAI 兼容');
 
 /** Agent 默认配置：能力默认收紧，由管理员显式放开 */
 const AGENT_DEFAULTS = {
@@ -84,8 +59,10 @@ const AGENT_DEFAULTS = {
     maxRows: 200             // 单工具数据行数上限
 };
 
-/** 默认对话超时（毫秒） */
+/** 非流式总超时（毫秒） */
 const TIMEOUT_MS = 60000;
+/** 流式空闲超时（毫秒）：每收到数据重置倒计时，持续传输不中断 */
+const IDLE_MS = 60000;
 
 /** 系统提示词：定位为运维助手，约束输出格式 */
 const SYSTEM_PROMPT = `你是 SgOps 批量运维管理平台的 AI 运维助手，服务于内网运维场景。
@@ -99,14 +76,14 @@ const SYSTEM_PROMPT = `你是 SgOps 批量运维管理平台的 AI 运维助手�
 const AGENT_PROMPT = `你现在具备工具调用（Agent）能力，按以下规则完成任务：
 1. 需要真实数据（主机清单、数据源清单、表内容）时必须调用工具，不要凭猜测编造数据。
 2. 生成测试数据用 generate_data；产出可复用脚本用 save_script 落库，不要只在回复里贴代码。
-3. 调用工具前先用一句话说明要做什么；工具失败时换思路重试，最多重试一轮。
+3. 调用工具前先用一句话说明要做什么；工具失败（ok=false）时换思路重试，最多重试一轮。ok=true 但 exitCode≠0 是命令本身的正常结果（路径不存在/文件有差异/无匹配等），输出与 stderr 就是证据，直接采信继续分析，不要当作故障重试或中断。
 4. 涉及删除、覆写、关停等高危动作，先给出方案让用户确认，不要直接执行。
 5. 远程执行类工具（run_host_command / run_batch_command / terminal_run）会触发用户审批弹窗，被拒绝时不要反复重试。
-6. 排障优先复用用户已打开的终端会话：list_terminals 查看，terminal_run 在该 shell 执行（延续其目录/环境）；无合适会话再用 run_host_command 新建连接。
+6. 远程单条命令必须优先复用用户已打开的终端会话：上下文【当前终端会话】或 list_terminals 给出 sessionId 时用 terminal_run（延续用户当前目录/环境，能看到用户排障现场）；仅当目标主机没有已打开会话时才用 run_host_command（它也会自动优先复用同主机会话）。不要放着现成会话不用而反复新建连接。
 7. 若用户圈定了「操作目标」范围，只能对范围内的主机/数据源/会话操作，范围外会被拒绝。
-8. 最终回复要说明「调用了哪些工具 + 得到什么结论」，保持简洁。`;
-
-const providerById = id => PROVIDERS.find(p => p.id === id) || null;
+8. 网络类排障先取流量证据：get_proxy_summary 看本地代理流水（哪个进程在报什么错），analyze_pcap 分析用户已打开的流量包（异常连接/HTTP 错误码）；工具提示未打开流量包时，引导用户去「安全运维 → 网络安全 → 流量分析」打开文件后继续。
+9. 最终回复要说明「调用了哪些工具 + 得到什么结论」，保持简洁。
+10. 终端会话可能被用户手动嵌套 ssh 跳转到其它机器：以工具返回的 currentHost/currentIps 为实际执行主机（list_terminals 与上下文给的是最近探测值）；描述结论时归因到有效主机，不要把跳转后机器上的结果说成建连主机的。run_host_command 发现会话已跳离目标主机时会自动改新建连接。`;
 
 /** 把用户圈定的操作目标 id 解析成名称，追加到 Agent 系统提示，让模型知道可用范围 */
 function describeScope(scope) {
@@ -183,56 +160,168 @@ function resolveSystem(roleId, username) {
 }
 
 /* ------------------------------------------------------------------
- * 配置读写
+ * 模型档案（db.aiProfiles）+ 配置读写
  * ------------------------------------------------------------------ */
 
-function getConfig() {
-    const raw = store.get('aiConfig') || {};
-    const ext = secrets.aiOverride();       // 外置密钥文件优先注入（ai.apiKey 等）
-    const provider = providerById(ext.provider || raw.provider) || PROVIDERS[0];
-    const apiKey = ext.apiKey || decrypt(raw.apiKey);
+const findProfile = id => (store.get('aiProfiles') || []).find(p => p.id === id) || null;
+
+/** 档案 → 引擎配置（Key 解密；档案是用户显式选择，外置密钥不再覆盖） */
+function profileConfig(prof) {
+    const protocol = normalizeProtocol(prof.protocol);
+    const apiKey = decrypt(prof.apiKey);
     return {
-        provider: provider.id,
-        label: provider.label,
-        baseURL: (ext.baseURL || raw.baseURL || provider.baseURL).replace(/\/+$/, ''),
-        model: ext.model || raw.model || provider.model,
+        protocol,
+        label: protocolLabel(protocol),
+        baseURL: String(prof.baseURL || '').replace(/\/+$/, ''),
+        model: prof.model || '',
         apiKey,
         configured: !!apiKey,
-        fromExternal: !!ext.apiKey
+        fromExternal: false,
+        profileId: prof.id,
+        profileName: prof.name || prof.model || ''
     };
 }
 
-/** 出参脱敏：API Key 永不明文返回 */
-function publicConfig() {
+/** 当前生效档案：用户偏好 > 全局默认 */
+function resolveProfile(username) {
+    const pid = username ? getUserPrefs(username).profileId : '';
+    return (pid && findProfile(pid)) || findProfile((store.get('aiConfig') || {}).profileId) || null;
+}
+
+function getConfig(username) {
+    const prof = resolveProfile(username);
+    if (prof) return profileConfig(prof);
     const raw = store.get('aiConfig') || {};
-    const ext = secrets.aiOverride();
+    const ext = secrets.aiOverride();       // 外置密钥文件仅对未启用档案的自定义配置生效
+    const protocol = normalizeProtocol(ext.protocol || raw.protocol);
+    const apiKey = ext.apiKey || decrypt(raw.apiKey);
     return {
-        provider: raw.provider || 'deepseek',
-        baseURL: raw.baseURL || '',
-        model: raw.model || '',
-        hasKey: !!(ext.apiKey || (raw.apiKey && decrypt(raw.apiKey))),
-        externalKey: !!ext.apiKey,
-        providers: PROVIDERS
+        protocol,
+        label: protocolLabel(protocol),
+        baseURL: String(ext.baseURL || raw.baseURL || '').replace(/\/+$/, ''),
+        model: ext.model || raw.model || '',
+        apiKey,
+        configured: !!apiKey,
+        fromExternal: !!ext.apiKey,
+        profileId: '',
+        profileName: ''
     };
 }
 
-/** 保存配置（apiKey 留空表示不修改） */
+/** 档案清单（脱敏：永不返回 Key 明文/密文） */
+function listProfiles() {
+    const activeId = (store.get('aiConfig') || {}).profileId || '';
+    return (store.get('aiProfiles') || []).map(p => ({
+        id: p.id,
+        name: p.name || p.model || '未命名档案',
+        protocol: normalizeProtocol(p.protocol),
+        baseURL: String(p.baseURL || '').replace(/\/+$/, ''),
+        model: p.model || '',
+        hasKey: !!(p.apiKey && decrypt(p.apiKey)),
+        active: p.id === activeId,
+        createdAt: p.createdAt || ''
+    }));
+}
+
+/** 出参脱敏：API Key 永不明文返回；回显全局默认配置 + 档案清单 */
+function publicConfig() {
+    const cfg = getConfig();
+    return {
+        protocol: cfg.protocol,
+        baseURL: cfg.baseURL,
+        model: cfg.model,
+        hasKey: cfg.configured,
+        externalKey: cfg.fromExternal,
+        profileId: cfg.profileId,
+        profileName: cfg.profileName,
+        profiles: listProfiles(),
+        protocols: PROTOCOLS
+    };
+}
+
+/** 保存档案（新建/编辑）；编辑全局默认档案时同步 aiConfig，无默认时首个档案自动启用 */
+function saveProfile(payload = {}) {
+    const prev = payload.id ? findProfile(payload.id) : null;
+    if (payload.id && !prev) return { ok: false, message: '档案不存在' };
+    const protocol = normalizeProtocol(payload.protocol || (prev && prev.protocol));
+    const baseURL = String(payload.baseURL || (prev && prev.baseURL) || '').trim().replace(/\/+$/, '');
+    if (!/^https?:\/\//.test(baseURL)) return { ok: false, message: '接口地址需以 http(s):// 开头' };
+    const model = String(payload.model || (prev && prev.model) || '').trim();
+    if (!model) return { ok: false, message: '请填写模型名称' };
+    const name = String(payload.name || '').trim() || model;
+
+    let apiKey = (prev && prev.apiKey) || '';
+    if (payload.apiKey && payload.apiKey !== mask()) apiKey = encrypt(payload.apiKey);
+
+    const saved = store.upsert('aiProfiles', {
+        id: payload.id || undefined,
+        name, protocol, baseURL, model, apiKey,
+        createdAt: (prev && prev.createdAt) || store.nowText()
+    });
+
+    const raw = store.get('aiConfig') || {};
+    const isActive = raw.profileId === saved.id;
+    const noActive = !findProfile(raw.profileId);
+    if (isActive || noActive) {
+        store.set('aiConfig', { protocol, baseURL, model, apiKey, profileId: saved.id });
+    }
+    return { ok: true, profile: listProfiles().find(p => p.id === saved.id), profiles: listProfiles(), config: publicConfig() };
+}
+
+function deleteProfile(id) {
+    const prof = findProfile(id);
+    if (!prof) return { ok: false, message: '档案不存在' };
+    if ((store.get('aiConfig') || {}).profileId === id) {
+        return { ok: false, message: '当前默认档案不可删除，请先启用其它档案' };
+    }
+    store.remove('aiProfiles', id);
+    // 清理仍指向该档案的用户偏好
+    const prefs = store.get('aiUserPrefs') || {};
+    Object.keys(prefs).forEach(u => {
+        if (prefs[u] && prefs[u].profileId === id) delete prefs[u].profileId;
+    });
+    store.persist();
+    return { ok: true, profiles: listProfiles(), config: publicConfig() };
+}
+
+/** 启用档案为全局默认（管理员）：aiConfig 指向该档案 */
+function activateProfile(id) {
+    const prof = findProfile(id);
+    if (!prof) return { ok: false, message: '档案不存在' };
+    store.set('aiConfig', {
+        protocol: normalizeProtocol(prof.protocol),
+        baseURL: String(prof.baseURL || '').replace(/\/+$/, ''),
+        model: prof.model || '',
+        apiKey: prof.apiKey || '',
+        profileId: prof.id
+    });
+    return { ok: true, config: publicConfig() };
+}
+
+/** 用户级档案切换（仅影响本人会话）：同时清掉旧档案下的模型名覆盖 */
+function useProfile(username, id) {
+    if (id && !findProfile(id)) return { ok: false, message: '档案不存在' };
+    saveUserPrefs(username, { profileId: id || '', model: '' });
+    return { ok: true };
+}
+
+/** 保存自定义配置（不挂档案；apiKey 留空表示不修改；老库 provider 字段被 protocol 取代） */
 function saveConfig(payload = {}) {
     const prev = store.get('aiConfig') || {};
-    const providerId = providerById(payload.provider) ? payload.provider : (prev.provider || 'deepseek');
-    const provider = providerById(providerId) || PROVIDERS[0];
-    const baseURL = String(payload.baseURL || prev.baseURL || provider.baseURL).trim().replace(/\/+$/, '');
+    const protocol = normalizeProtocol(payload.protocol || prev.protocol);
+    const baseURL = String(payload.baseURL || prev.baseURL || '').trim().replace(/\/+$/, '');
     if (!/^https?:\/\//.test(baseURL)) {
         return { ok: false, message: '接口地址需以 http(s):// 开头' };
     }
-    const model = String(payload.model || prev.model || provider.model).trim();
+    const model = String(payload.model || prev.model || '').trim();
     if (!model) return { ok: false, message: '请填写模型名称' };
 
     const next = {
-        provider: providerId,
+        protocol,
         baseURL,
         model,
-        apiKey: prev.apiKey || ''
+        apiKey: prev.apiKey || '',
+        profileId: ''
     };
     // 传入新 Key（非掩码占位）才更新密文
     if (payload.apiKey && payload.apiKey !== mask()) {
@@ -298,6 +387,7 @@ function saveUserPrefs(username, patch = {}) {
     const prefs = prefsRoot();
     const next = { ...(prefs[username] || {}) };
     if ('model' in patch) next.model = String(patch.model || '').trim();
+    if ('profileId' in patch) next.profileId = String(patch.profileId || '').trim();
     if ('agentEnabled' in patch) next.agentEnabled = !!patch.agentEnabled;
     if ('role' in patch) next.role = String(patch.role || '').trim();
     prefs[username] = next;
@@ -305,9 +395,9 @@ function saveUserPrefs(username, patch = {}) {
     return next;
 }
 
-/** 该用户最终生效的模型（用户偏好 > 全局配置） */
+/** 该用户最终生效的模型（用户偏好 > 生效档案/全局配置） */
 function resolveModel(username) {
-    const cfg = getConfig();
+    const cfg = getConfig(username);
     return getUserPrefs(username).model || cfg.model;
 }
 
@@ -327,30 +417,241 @@ function agentState(username) {
  * HTTP 请求构造
  * ------------------------------------------------------------------ */
 
-function buildRequest(cfg, messages, options = {}) {
-    const { stream = false, model, tools = null } = options;
-    const body = { model: model || cfg.model, messages, stream };
+const parseArgs = raw => {
+    if (!raw) return {};
+    if (typeof raw === 'object') return raw;
+    try { return JSON.parse(raw); } catch (e) { return {}; }
+};
+
+/**
+ * 拆分前导 system（界面上下文 preamble）与对话主体：
+ * 前导 system 永远保留，主体按 keep 截断——避免长会话把上下文挤掉。
+ */
+function splitPreamble(messages, keep) {
+    const arr = Array.isArray(messages) ? messages : [];
+    const lead = [];
+    let i = 0;
+    while (i < arr.length && arr[i] && arr[i].role === 'system') { lead.push(arr[i]); i++; }
+    return { lead, rest: arr.slice(i).slice(-keep) };
+}
+
+/**
+ * 组装最终消息：所有 system 内容（主提示词 + 界面 preamble）合并为唯一一条置顶 system。
+ * llama.cpp / Qwen 等本地推理模板只允许开头一条 system，多条或中途出现会直接 500。
+ */
+function buildMessages(systemText, messages, keep) {
+    const { lead, rest } = splitPreamble(messages, keep);
+    const sys = [systemText, ...lead.map(m => String((m && m.content) || ''))].filter(Boolean).join('\n\n');
+    const body = rest.map(m => (m && m.role === 'system') ? { ...m, role: 'user' } : m);
+    return [{ role: 'system', content: sys }, ...body];
+}
+
+/** 合并超时信号与用户中止信号（AbortSignal.any 不可用时手动桥接） */
+function combineSignals(signals) {
+    const list = signals.filter(Boolean);
+    if (list.length <= 1) return list[0];
+    if (typeof AbortSignal.any === 'function') return AbortSignal.any(list);
+    const ctrl = new AbortController();
+    for (const s of list) {
+        if (s.aborted) { ctrl.abort(s.reason); break; }
+        s.addEventListener('abort', () => ctrl.abort(s.reason), { once: true });
+    }
+    return ctrl.signal;
+}
+
+/** 流式空闲看门狗：仅连续 ms 无数据才 abort；touch() 重置倒计时，stop() 结束清理 */
+function idleWatchdog(ms) {
+    const ctrl = new AbortController();
+    let timer = null;
+    const arm = () => {
+        clearTimeout(timer);
+        timer = setTimeout(() => ctrl.abort(new DOMException('The operation was aborted due to timeout', 'TimeoutError')), ms);
+    };
+    arm();
+    return { signal: ctrl.signal, touch: arm, stop: () => clearTimeout(timer) };
+}
+
+/* ---------------- 请求体构造（双协议） ---------------- */
+
+function openaiBody(cfg, messages, { stream, model, tools }) {
+    const body = { model: model || cfg.model, messages, stream: !!stream };
     if (tools && tools.length) {
         body.tools = tools;
         body.tool_choice = 'auto';
     }
+    return body;
+}
+
+/** OpenAI 形状消息 → Anthropic messages（system 抽出、tool_calls→tool_use、tool→tool_result） */
+function toAnthropicMessages(msgs) {
+    const out = [];
+    let pending = null;
+    const flush = () => {
+        if (pending) { out.push({ role: 'user', content: pending }); pending = null; }
+    };
+    for (const m of msgs) {
+        if (m.role === 'tool') {
+            pending = pending || [];
+            pending.push({
+                type: 'tool_result',
+                tool_use_id: m.tool_call_id,
+                content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content)
+            });
+            continue;
+        }
+        flush();
+        if (m.role === 'assistant') {
+            const calls = Array.isArray(m.tool_calls) ? m.tool_calls : [];
+            if (calls.length) {
+                const blocks = [];
+                if (m.content) blocks.push({ type: 'text', text: String(m.content) });
+                calls.forEach(c => blocks.push({
+                    type: 'tool_use', id: c.id,
+                    name: c.function?.name, input: parseArgs(c.function?.arguments)
+                }));
+                out.push({ role: 'assistant', content: blocks });
+            } else {
+                out.push({ role: 'assistant', content: String(m.content || '') });
+            }
+        } else {
+            out.push({ role: 'user', content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content) });
+        }
+    }
+    flush();
+    return out;
+}
+
+function anthropicBody(cfg, messages, { stream, model, tools }) {
+    const sysParts = [];
+    const conv = [];
+    for (const m of messages) {
+        if (m.role === 'system') { if (m.content) sysParts.push(String(m.content)); continue; }
+        conv.push(m);
+    }
+    const body = {
+        model: model || cfg.model,
+        max_tokens: 4096,
+        stream: !!stream,
+        messages: toAnthropicMessages(conv)
+    };
+    if (sysParts.length) body.system = sysParts.join('\n\n');
+    if (tools && tools.length) {
+        body.tools = tools.map(t => ({
+            name: t.function.name,
+            description: t.function.description || '',
+            input_schema: t.function.parameters || { type: 'object', properties: {} }
+        }));
+        body.tool_choice = { type: 'auto' };
+    }
+    return body;
+}
+
+/** 响应归一化为 OpenAI 形状 {content, tool_calls}，Agent 循环无需感知协议 */
+function normalizeResponse(json, protocol) {
+    if (protocol === 'anthropic') {
+        const blocks = Array.isArray(json.content) ? json.content : [];
+        let text = '';
+        const tool_calls = [];
+        for (const b of blocks) {
+            if (b.type === 'text') text += b.text || '';
+            else if (b.type === 'tool_use') {
+                tool_calls.push({
+                    id: b.id, type: 'function',
+                    function: { name: b.name, arguments: JSON.stringify(b.input || {}) }
+                });
+            }
+        }
+        return { role: 'assistant', content: text, tool_calls: tool_calls.length ? tool_calls : undefined };
+    }
+    const msg = json.choices?.[0]?.message || {};
+    return { ...msg, role: 'assistant' };
+}
+
+/** SSE 单行 data → 增量文本（按协议解析） */
+function sseDelta(data, protocol) {
+    try {
+        const j = JSON.parse(data);
+        if (protocol === 'anthropic') {
+            return (j.type === 'content_block_delta' && j.delta?.type === 'text_delta') ? (j.delta.text || '') : '';
+        }
+        return j.choices?.[0]?.delta?.content || '';
+    } catch (e) { return ''; }
+}
+
+/** 构造 fetch 入参：按协议选择 URL / 鉴权头 / 请求体 */
+function requestSpec(cfg, messages, options = {}) {
+    const { stream = false, model, tools = null, signal } = options;
+    const anthropic = cfg.protocol === 'anthropic';
+    const body = anthropic
+        ? anthropicBody(cfg, messages, { stream, model, tools })
+        : openaiBody(cfg, messages, { stream, model, tools });
+    const headers = { 'Content-Type': 'application/json' };
+    let url;
+    if (anthropic) {
+        url = cfg.baseURL.replace(/\/v1$/, '') + '/v1/messages';
+        headers['x-api-key'] = cfg.apiKey;
+        headers['anthropic-version'] = '2023-06-01';
+    } else {
+        url = `${cfg.baseURL}/chat/completions`;
+        headers['Authorization'] = `Bearer ${cfg.apiKey}`;
+    }
     return {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${cfg.apiKey}`
-        },
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(TIMEOUT_MS)
+        url,
+        init: {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(body),
+            signal
+        }
     };
 }
 
-/** 统一的错误解析：提炼各家返回体中的 message */
+/** 统一的错误解析：提炼各家返回体中的 message（Anthropic 为 {error:{message}}，OpenAI 同形） */
 async function httpError(res) {
     const text = await res.text().catch(() => '');
     let detail = text;
     try { detail = JSON.parse(text).error?.message || text; } catch (e) { /* 保持原文 */ }
-    return new Error(`AI 接口错误 ${res.status}：${detail}`);
+    const err = new Error(`AI 接口错误 ${res.status}：${detail}`);
+    err.status = res.status;
+    return err;
+}
+
+/**
+ * 带一次自动重试的 fetch：仅对瞬时故障（超时 / 网络抖动 / 5xx / 429）重试，
+ * 用户主动中止与 4xx 业务错误不重试。重试前回调 onRetry 供界面/日志提示。
+ * 超时策略：opts.idle（流式）用空闲看门狗，持续有数据不中断；否则总超时。
+ * 每次尝试独立计时，重试不受上一次已 abort 的信号影响。
+ * @returns {Promise<{res: Response, watchdog: object|null}>} 流式调用方负责 touch/stop
+ */
+async function fetchWithRetry(url, init, opts = {}) {
+    const attempt = async () => {
+        const wd = opts.idle ? idleWatchdog(IDLE_MS) : null;
+        try {
+            const signal = combineSignals([wd ? wd.signal : AbortSignal.timeout(TIMEOUT_MS), opts.signal]);
+            const res = await fetch(url, { ...init, signal });
+            if (!res.ok) {
+                const err = await httpError(res);
+                err.retryable = res.status >= 500 || res.status === 429;
+                throw err;
+            }
+            return { res, watchdog: wd };
+        } catch (err) {
+            if (wd) wd.stop();
+            throw err;
+        }
+    };
+    try {
+        return await attempt();
+    } catch (err) {
+        if (opts.signal && opts.signal.aborted) throw err;          // 用户中止：不重试
+        const transient = err.retryable || err.name === 'TimeoutError' ||
+            /timeout|aborted|network|fetch failed|ECONNRESET|ETIMEDOUT|socket|UND_ERR/i.test(err.message || '');
+        if (!transient) throw err;
+        if (typeof opts.onRetry === 'function') opts.onRetry(err.message);
+        await new Promise(r => setTimeout(r, 800));
+        if (opts.signal && opts.signal.aborted) throw err;
+        return await attempt();
+    }
 }
 
 /** 入参校验：未配置 Key / 空消息统一前置拦下 */
@@ -360,61 +661,72 @@ function assertUsable(cfg, messages) {
 }
 
 /**
- * 流式对话：解析 SSE，逐段回调 onDelta
+ * 流式对话：解析 SSE，逐段回调 onDelta（双协议统一）
  * @returns {Promise<string>} 完整回复文本
  */
 async function chatStream(messages, options = {}) {
-    const { onDelta, model, system } = options;
-    const cfg = getConfig();
+    const { onDelta, model, system, signal, onRetry } = options;
+    const cfg = getConfig(options.user);
     assertUsable(cfg, messages);
 
-    const finalMessages = [{ role: 'system', content: system || SYSTEM_PROMPT }].concat(messages.slice(-24));
-    const res = await fetch(`${cfg.baseURL}/chat/completions`, buildRequest(cfg, finalMessages, { stream: true, model }));
+    const finalMessages = buildMessages(system || SYSTEM_PROMPT, messages, 24);
+    const spec = requestSpec(cfg, finalMessages, { stream: true, model, signal });
+    const { res, watchdog } = await fetchWithRetry(spec.url, spec.init, { signal, onRetry, idle: true });
 
-    if (!res.ok) throw await httpError(res);
-    if (!res.body) throw new Error('AI 接口未返回流式内容');
+    try {
+        if (!res.body) throw new Error('AI 接口未返回流式内容');
 
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-    let full = '';
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let full = '';
 
-    while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            watchdog.touch(); // 收到数据即重置空闲倒计时，持续传输不中断
+            if (signal && signal.aborted) { reader.cancel().catch(() => {}); break; }
+            buffer += decoder.decode(value, { stream: true });
 
-        const lines = buffer.split('\n');
-        buffer = lines.pop(); // 末段可能不完整，留到下轮
-        for (const line of lines) {
-            const s = line.trim();
-            if (!s.startsWith('data:')) continue;
-            const data = s.slice(5).trim();
-            if (!data || data === '[DONE]') continue;
-            let delta = '';
-            try {
-                delta = JSON.parse(data).choices?.[0]?.delta?.content || '';
-            } catch (e) { /* 忽略残缺行 */ }
-            if (delta) {
-                full += delta;
-                if (typeof onDelta === 'function') onDelta(delta);
+            const lines = buffer.split('\n');
+            buffer = lines.pop(); // 末段可能不完整，留到下轮
+            for (const line of lines) {
+                const s = line.trim();
+                if (!s.startsWith('data:')) continue;
+                const data = s.slice(5).trim();
+                if (!data || data === '[DONE]') continue;
+                const delta = sseDelta(data, cfg.protocol);
+                if (delta) {
+                    full += delta;
+                    if (typeof onDelta === 'function') onDelta(delta);
+                }
             }
         }
+        if (signal && signal.aborted) {
+            const err = new Error('已中止生成');
+            err.aborted = true;
+            throw err;
+        }
+        return full;
+    } catch (err) {
+        if (err.name === 'TimeoutError') throw new Error('AI 接口长时间无数据（空闲 60 秒），已中断，请重试或检查模型服务');
+        throw err;
+    } finally {
+        watchdog.stop();
     }
-    return full;
 }
 
 /** 非流式完整对话（脚本生成 / 优化等需要一次性结果的场景） */
 async function complete(messages, options = {}) {
-    const cfg = getConfig();
+    const cfg = options.cfg || getConfig(options.user);
     assertUsable(cfg, messages);
 
-    const finalMessages = [{ role: 'system', content: options.system || SYSTEM_PROMPT }].concat(messages.slice(-24));
-    const res = await fetch(`${cfg.baseURL}/chat/completions`, buildRequest(cfg, finalMessages, { stream: false, model: options.model }));
+    const finalMessages = buildMessages(options.system || SYSTEM_PROMPT, messages, 24);
+    const spec = requestSpec(cfg, finalMessages, { stream: false, model: options.model, signal: options.signal });
+    const { res } = await fetchWithRetry(spec.url, spec.init, { signal: options.signal, onRetry: options.onRetry });
 
-    if (!res.ok) throw await httpError(res);
     const json = await res.json();
-    const content = json.choices?.[0]?.message?.content || '';
+    const content = normalizeResponse(json, cfg.protocol).content || '';
     if (!content) throw new Error('AI 未返回有效内容');
     return { text: content, usage: json.usage || null };
 }
@@ -426,24 +738,20 @@ async function complete(messages, options = {}) {
  * 拿到最终回复后按块回推前端，沿用同一套「边打字边输出」的 UI。
  */
 
-const parseArgs = raw => {
-    if (!raw) return {};
-    try { return JSON.parse(raw); } catch (e) { return {}; }
-};
-
-/** 一次带工具的决策请求 */
-async function callWithTools(messages, { cfg, model, tools }) {
-    const res = await fetch(`${cfg.baseURL}/chat/completions`, buildRequest(cfg, messages, { stream: false, model, tools }));
-    if (!res.ok) throw await httpError(res);
+/** 一次带工具的决策请求（响应归一化为 OpenAI 形状） */
+async function callWithTools(messages, { cfg, model, tools, signal, onRetry }) {
+    const spec = requestSpec(cfg, messages, { stream: false, model, tools, signal });
+    const { res } = await fetchWithRetry(spec.url, spec.init, { signal, onRetry });
     const json = await res.json();
-    return json.choices?.[0]?.message || {};
+    return normalizeResponse(json, cfg.protocol);
 }
 
 /** 把最终文本按小块回推，模拟流式效果 */
-async function emitText(text, onDelta) {
+async function emitText(text, onDelta, signal) {
     if (typeof onDelta !== 'function' || !text) return;
     const size = 18;
     for (let i = 0; i < text.length; i += size) {
+        if (signal && signal.aborted) return;
         onDelta(text.slice(i, i + size));
         await new Promise(r => setTimeout(r, 12));
     }
@@ -456,8 +764,8 @@ async function emitText(text, onDelta) {
  * @returns {Promise<{text:string, steps:Array}>}
  */
 async function chatAgent(messages, options = {}) {
-    const { onDelta, onStep, user, scope, approve } = options;
-    const cfg = getConfig();
+    const { onDelta, onStep, user, scope, approve, signal, onRetry } = options;
+    const cfg = getConfig(user);
     assertUsable(cfg, messages);
 
     const agentCfg = options.agent && typeof options.agent === 'object' ? options.agent : {};
@@ -470,12 +778,19 @@ async function chatAgent(messages, options = {}) {
         .map(t => t.name);
     const tools = allowed.length ? agentTools.toolSchemas(allowed) : null;
 
-    const convo = [{ role: 'system', content: `${options.system || SYSTEM_PROMPT}\n\n${AGENT_PROMPT}${describeScope(scope)}` }].concat(messages.slice(-16));
+    // 本机操作系统：让模型区分 run_local_command（本机语法）与远程 Linux 命令
+    const localOs = process.platform === 'win32' ? 'Windows（run_local_command 用 Windows 命令语法，如 dir / type，不要用 ls / cat）'
+        : process.platform === 'darwin' ? 'macOS' : 'Linux';
+    const envLine = `\n\n【运行环境】平台本机：${localOs}；远程纳管主机通常为 Linux，run_host_command / run_batch_command / terminal_run 用 Linux Shell 语法。`;
+
+    const sysText = `${options.system || SYSTEM_PROMPT}\n\n${AGENT_PROMPT}${describeScope(scope)}${envLine}`;
+    const convo = buildMessages(sysText, messages, 16);
     const steps = [];
     let text = '';
 
     for (let round = 0; round < maxSteps; round++) {
-        const msg = await callWithTools(convo, { cfg, model, tools });
+        if (signal && signal.aborted) break;
+        const msg = await callWithTools(convo, { cfg, model, tools, signal, onRetry });
         const calls = Array.isArray(msg.tool_calls) ? msg.tool_calls : [];
 
         if (!calls.length) {
@@ -485,6 +800,7 @@ async function chatAgent(messages, options = {}) {
 
         convo.push(msg);
         for (const call of calls) {
+            if (signal && signal.aborted) break;
             const name = call.function?.name;
             const args = parseArgs(call.function?.arguments);
             const label = (agentTools.TOOLS[name] || {}).label || name;
@@ -508,6 +824,12 @@ async function chatAgent(messages, options = {}) {
         text = '';
     }
 
+    if (signal && signal.aborted) {
+        const err = new Error('已中止生成');
+        err.aborted = true;
+        throw err;
+    }
+
     if (!text) {
         text = steps.length
             ? '已完成工具调用，但模型未给出最终总结。执行结果如下：\n' +
@@ -515,18 +837,25 @@ async function chatAgent(messages, options = {}) {
             : '未获取到有效回复，请重试或更换模型。';
     }
 
-    await emitText(text, onDelta);
+    await emitText(text, onDelta, signal);
     return { text, steps };
 }
 
-/** 连接测试：发送极短消息，返回耗时与结果 */
-async function testConnection(model) {
+/** 连接测试：发送极短消息，返回耗时与结果；profileId 指定时测试该档案（不影响生效配置） */
+async function testConnection(model, profileId) {
     const started = Date.now();
-    const cfg = getConfig();
+    let cfg;
+    if (profileId) {
+        const prof = findProfile(profileId);
+        if (!prof) return { ok: false, durationMs: 0, message: '档案不存在，请先保存' };
+        cfg = profileConfig(prof);
+    } else {
+        cfg = getConfig();
+    }
     if (!cfg.configured) return { ok: false, durationMs: Date.now() - started, message: '尚未配置 API Key' };
-    const target = model || resolveModel();
+    const target = model || cfg.model;
     try {
-        const { text } = await complete([{ role: 'user', content: '请回复"OK"' }], { model: target });
+        const { text } = await complete([{ role: 'user', content: '请回复"OK"' }], { model: target, cfg });
         return {
             ok: true,
             durationMs: Date.now() - started,
@@ -538,8 +867,9 @@ async function testConnection(model) {
 }
 
 module.exports = {
-    PROVIDERS, DEFAULT_CONFIG, AGENT_DEFAULTS, SYSTEM_PROMPT,
-    providerById, getConfig, publicConfig, saveConfig,
+    PROTOCOLS, DEFAULT_CONFIG, AGENT_DEFAULTS, SYSTEM_PROMPT,
+    normalizeProtocol, protocolLabel, getConfig, publicConfig, saveConfig,
+    listProfiles, saveProfile, deleteProfile, activateProfile, useProfile,
     getAgentConfig, saveAgentConfig,
     listRoles, saveRole, deleteRole, resolveSystem,
     getUserPrefs, saveUserPrefs, resolveModel, agentState,

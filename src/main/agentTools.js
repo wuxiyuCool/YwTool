@@ -30,6 +30,22 @@ const clamp = text => {
     return s.length > MAX_RESULT_CHARS ? s.slice(0, MAX_RESULT_CHARS) + `\n…（已截断，共 ${s.length} 字符）` : s;
 };
 
+/** 命令跑完但退出码非零（ls 路径不存在 / diff 有差异 / grep 无匹配）是证据而非工具故障 */
+const exitNote = (code, base) => {
+    const parts = base ? [base] : [];
+    if (code !== 0 && code !== null && code !== undefined) {
+        parts.push(`命令退出码 ${code}：非零是命令本身的结果（路径不存在/有差异/无匹配等），输出与 stderr 仍是有效证据，不算工具失败，不要因此重试或中断`);
+    }
+    return parts.length ? parts.join('；') : undefined;
+};
+
+/** 会话当前 shell 是否仍在目标主机上（用户可能嵌套 ssh 跳走）；IP/主机名任一命中即算 */
+const whereMatches = (w, host) => !!w && (
+    (w.ips || []).includes(host.ip) ||
+    (!!w.host && (w.host === host.name || w.host === host.ip))
+);
+const whereText = w => `${w.host || '未知主机'}${(w.ips || []).length ? `（${w.ips.join(', ')}）` : ''}`;
+
 /* ---------------- 随机数据生成（可复现的种子随机） ---------------- */
 
 function mulberry32(seed) {
@@ -428,7 +444,7 @@ const TOOLS = {
     run_host_command: {
         name: 'run_host_command',
         label: '远程主机执行命令',
-        desc: '在平台纳管的某台主机（SSH）上执行一条命令并返回输出；受敏感词黑白名单约束，建议先用 list_hosts 获取 hostId',
+        desc: '在平台纳管的某台主机上执行一条命令并返回输出；该主机已有用户打开的终端会话时自动复用会话（延续其目录/环境），否则新建 SSH 连接；受敏感词黑白名单约束，建议先用 list_hosts 获取 hostId',
         risk: '高危',
         gate: 'allowRemoteExec',
         scopeKind: 'host', scopeArg: 'hostId', needsApproval: true,
@@ -452,20 +468,61 @@ const TOOLS = {
                 audit.write({ type: '拦截', user: ctx.user || '-', detail: `AI Agent 远程命令被拦截（${host.name}）：${command}`, result: 'blocked' });
                 return { ok: false, blocked: true, error: check.reason };
             }
+            const timeoutSec = store.get('config').cmdTimeout || 30;
             const started = Date.now();
-            const res = await ssh.execOnHost(host, command, store.get('config').cmdTimeout || 30);
+            // 优先复用用户已打开的同主机终端会话（延续其 cwd/环境），避免重复建连丢上下文
+            const terminal = require('./handlers/terminalHandler');
+            const sess = terminal.listSessions()
+                .filter(s => s.hostId === host.id)
+                .sort((a, b) => a.idleMs - b.idleMs)[0];
+            let jumpNote;
+            if (sess) {
+                // 先无副作用探测当前 shell 的有效主机：用户可能已嵌套 ssh 跳到别的机器，跳走则不能复用
+                const probe = await terminal.agentExec(sess.sessionId, ':', 5000);
+                const where = probe.ok && !probe.partial ? { host: probe.currentHost, ips: probe.currentIps || [] } : null;
+                if (where && !whereMatches(where, host)) {
+                    jumpNote = `终端会话已 ssh 跳转：当前 shell 在 ${whereText(where)}，与目标主机 ${host.name}（${host.ip}）不符，未复用会话，改为新建连接`;
+                } else if (where) {
+                    const r = await terminal.agentExec(sess.sessionId, command, Math.min(Math.max(timeoutSec, 5), 60) * 1000);
+                    if (r.ok) {
+                        audit.write({
+                            type: '命令', user: ctx.user || '-', source: 'AI Agent',
+                            detail: `AI Agent 复用终端会话在 ${host.name}（${host.ip}）执行：${command.slice(0, 200)}（exit=${r.exitCode === null || r.exitCode === undefined ? '?' : r.exitCode}${r.currentHost ? ` @${r.currentHost}` : ''}${r.partial ? '，超时未结束' : ''}）`,
+                            result: r.exitCode === 0 ? 'success' : 'failed'
+                        });
+                        return {
+                            ok: true, via: 'terminal-session', sessionId: sess.sessionId,
+                            host: host.name, ip: host.ip, durationMs: Date.now() - started,
+                            exitCode: r.exitCode === undefined ? null : r.exitCode,
+                            currentHost: r.currentHost || null, currentIps: r.currentIps || [],
+                            output: clamp(String(r.output || '')),
+                            partial: r.partial || undefined,
+                            note: exitNote(r.exitCode, '复用用户已打开的终端会话，延续其当前目录与环境')
+                        };
+                    }
+                    // 会话恰好失效（被关闭/断开）：落回新建连接
+                }
+                // 探测失败（会话失效）：落回新建连接
+            }
+            const res = await ssh.execOnHost(host, command, timeoutSec);
+            const ran = res.exitCode !== null && res.exitCode !== undefined;
             audit.write({
                 type: '命令', user: ctx.user || '-', source: 'AI Agent',
-                detail: `AI Agent 在 ${host.name}（${host.ip}）执行：${command.slice(0, 200)}`,
+                detail: `AI Agent 在 ${host.name}（${host.ip}）执行：${command.slice(0, 200)}` +
+                    (ran ? `（exit=${res.exitCode}）` : '') +
+                    (res.status !== 'success' && res.error ? ` → ${String(res.error).slice(0, 160)}` : ''),
                 result: res.status === 'success' ? 'success' : 'failed'
             });
             return {
-                ok: res.status === 'success',
+                ok: ran || res.status === 'success',
                 host: host.name,
                 ip: host.ip,
                 durationMs: Date.now() - started,
+                exitCode: ran ? res.exitCode : null,
                 output: clamp(String(res.output || '')),
-                error: res.status === 'success' ? undefined : (res.error || '执行失败')
+                stderr: ran && res.error ? clamp(String(res.error)) : undefined,
+                error: ran ? undefined : (res.error || '执行失败'),
+                note: [jumpNote, ran ? exitNote(res.exitCode) : null].filter(Boolean).join('；') || undefined
             };
         }
     },
@@ -503,14 +560,22 @@ const TOOLS = {
             }
             const timeout = Number(args.timeoutSec) || store.get('config').cmdTimeout || 30;
             const results = await ssh.execBatch(targets, command, { timeout });
-            const summary = results.map(r => ({
-                host: r.hostName, ip: r.ip, status: r.status, exitCode: r.exitCode,
-                durationMs: r.durationMs, output: clamp(String(r.output || '')), error: r.error || undefined
-            }));
-            const okCount = summary.filter(r => r.status === 'success').length;
+            const summary = results.map(r => {
+                const ran = r.exitCode !== null && r.exitCode !== undefined;
+                return {
+                    host: r.hostName, ip: r.ip,
+                    ok: ran || r.status === 'success',
+                    exitCode: ran ? r.exitCode : null,
+                    durationMs: r.durationMs, output: clamp(String(r.output || '')),
+                    stderr: ran && r.error ? clamp(String(r.error)) : undefined,
+                    error: ran ? undefined : (r.error || '执行失败')
+                };
+            });
+            const okCount = summary.filter(r => r.ok).length;
             audit.write({
                 type: '命令', user: ctx.user || '-', source: 'AI Agent',
-                detail: `AI Agent 批量执行：${command.slice(0, 200)}（${targets.length} 台，成功 ${okCount}）`,
+                detail: `AI Agent 批量执行：${command.slice(0, 200)}（${targets.length} 台，完成 ${okCount}）` +
+                    (okCount < targets.length ? ` → ${summary.filter(r => !r.ok).map(r => `${r.host}:${r.error}`).join('；').slice(0, 160)}` : ''),
                 result: okCount === targets.length ? 'success' : 'failed'
             });
             return { ok: okCount === targets.length, total: targets.length, success: okCount, results: summary };
@@ -521,7 +586,7 @@ const TOOLS = {
     list_terminals: {
         name: 'list_terminals',
         label: '查询终端会话',
-        desc: '列出用户当前在终端工作台打开的交互式 SSH 会话（sessionId / 主机名 / 空闲时长），供 terminal_run 指定目标',
+        desc: '列出用户当前在终端工作台打开的交互式 SSH 会话（sessionId / 主机名 / 空闲时长 / currentHost+currentIps=最近探测到的有效主机，用户嵌套 ssh 跳转后会与建连主机不同），供 terminal_run 指定目标',
         risk: '只读',
         gate: null,
         schema: { type: 'object', properties: {} },
@@ -550,14 +615,65 @@ const TOOLS = {
         },
         async run(args = {}, ctx = {}) {
             const terminal = require('./handlers/terminalHandler');
+            const command = String(args.command || '').trim();
+            if (!command) return { ok: false, error: '命令为空' };
+            // 与 run_host_command 同边界：Agent 下发的命令必须过黑白名单（用户手动键入不在此列）
+            const check = security.validate(command, { user: ctx.user, source: 'AI Agent → 终端会话' });
+            if (!check.ok) {
+                audit.write({ type: '拦截', user: ctx.user || '-', detail: `AI Agent 终端命令被拦截：${command}`, result: 'blocked' });
+                return { ok: false, blocked: true, error: check.reason };
+            }
             const timeout = Math.min(Math.max(Number(args.timeoutSec) || 20, 5), 60) * 1000;
-            const res = await terminal.agentExec(String(args.sessionId || ''), String(args.command || '').trim(), timeout);
+            const res = await terminal.agentExec(String(args.sessionId || ''), command, timeout);
             audit.write({
                 type: '命令', user: ctx.user || '-', source: 'AI Agent',
-                detail: `AI Agent 在终端会话（${res.hostName || args.sessionId}）执行：${String(args.command).slice(0, 200)}`,
+                detail: `AI Agent 在终端会话（${res.hostName || args.sessionId}）执行：${command.slice(0, 200)}` +
+                    (res.ok && res.exitCode !== null && res.exitCode !== undefined ? `（exit=${res.exitCode}）` : '') +
+                    (res.ok && res.currentHost ? ` @${res.currentHost}` : '') +
+                    (res.ok ? '' : ` → ${String(res.error || '').slice(0, 160)}`),
                 result: res.ok ? 'success' : 'failed'
             });
+            if (res.ok) {
+                // 会话可能被用户嵌套 ssh 跳走：标明命令实际落在哪台机器，避免归因到建连主机
+                const sess = terminal.listSessions().find(x => x.sessionId === String(args.sessionId || ''));
+                const home = sess && store.list('hosts').find(h => h.id === sess.hostId);
+                const where = { host: res.currentHost, ips: res.currentIps || [] };
+                const jumped = home && (where.host || where.ips.length) && !whereMatches(where, home);
+                const base = jumped
+                    ? `该会话已 ssh 跳转：命令实际执行在 ${whereText(where)}，而非建连主机 ${home.name}（${home.ip}），结论请归因到有效主机`
+                    : '在用户已打开的终端会话执行，延续其当前目录与环境';
+                return { ...res, note: exitNote(res.exitCode, base) };
+            }
             return res;
+        }
+    },
+
+    /** 流量包聚合分析：只分析用户已在「流量分析」页打开的文件，不接收路径 */
+    analyze_pcap: {
+        name: 'analyze_pcap',
+        label: '分析已打开的流量包',
+        desc: '对用户当前在「安全运维→网络安全→流量分析」打开的 pcap/pcapng 做聚合分析：协议占比、Top 主机/会话、RST 与 SYN 无应答、HTTP 4xx/5xx 清单、TLS SNI 域名；未打开文件时返回引导提示，可配合 get_proxy_summary 做网络排障',
+        risk: '只读',
+        gate: null,
+        schema: { type: 'object', properties: {} },
+        async run(args = {}, ctx = {}) {
+            const pcap = require('./pcap');
+            const res = pcap.analyze();
+            if (res.ok) audit.write({ type: '查询', user: ctx.user || '-', source: 'AI Agent', detail: `AI Agent 分析流量包 ${res.file}（${res.total} 报文）` });
+            return res;
+        }
+    },
+
+    /** 抓包代理概况：运行状态 + 流水统计 + 按进程聚合，不含 header/body */
+    get_proxy_summary: {
+        name: 'get_proxy_summary',
+        label: '查看抓包代理概况',
+        desc: '查看本地抓包代理（类 Fiddler）状态与流量统计。返回两个口径：thisRun=本次启动以来（与界面统计条一致）；history=持久化滚动历史（跨多次运行，旧记录可能无进程名）。回答时必须标注数字所属口径，不要把 history 条数说成当前流量。不含请求头与正文',
+        risk: '只读',
+        gate: null,
+        schema: { type: 'object', properties: {} },
+        async run() {
+            return require('./netsec').trafficSummary();
         }
     },
 

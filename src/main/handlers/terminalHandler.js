@@ -176,14 +176,18 @@ function setup(ipcMain) {
 
     ipcMain.handle('terminal:list', () => ({
         ok: true,
-        sessions: [...sessions.entries()].map(([id, s]) => ({ sessionId: id, hostId: s.hostId, hostName: s.hostName, idleMs: Date.now() - s.lastActive }))
+        sessions: [...sessions.entries()].map(([id, s]) => ({
+            sessionId: id, hostId: s.hostId, hostName: s.hostName, idleMs: Date.now() - s.lastActive,
+            currentHost: (s.where || {}).host || null, currentIps: (s.where || {}).ips || [], whereAt: (s.where || {}).at || null
+        }))
     }));
 }
 
-/** 活跃会话清单（Agent 工具 list_terminals 用） */
+/** 活跃会话清单（Agent 工具 list_terminals 用）；currentHost/currentIps 为最近一次探测到的有效主机（可能已 ssh 跳转） */
 function listSessions() {
     return [...sessions.entries()].map(([id, s]) => ({
-        sessionId: id, hostId: s.hostId, hostName: s.hostName, idleMs: Date.now() - s.lastActive
+        sessionId: id, hostId: s.hostId, hostName: s.hostName, idleMs: Date.now() - s.lastActive,
+        currentHost: (s.where || {}).host || null, currentIps: (s.where || {}).ips || [], whereAt: (s.where || {}).at || null
     }));
 }
 
@@ -212,22 +216,34 @@ function agentExec(sessionId, command, timeoutMs = 20000) {
 
         const poll = setInterval(() => {
             if (settled) return;
-            const idx = s.buf.indexOf(marker, startLen);
-            if (idx < 0) return;
+            // marker 在 printf 回显行里也会出现（ mid-line ），只认行首且后跟退出码的那次（真实输出行）
+            let hit = null;
+            for (let from = startLen; !hit;) {
+                const i = s.buf.indexOf(marker, from);
+                if (i < 0) break;
+                const tail = s.buf.slice(i + marker.length, i + marker.length + 200);
+                const m = /^[ \t]*(-?\d+)(?:[ \t]+(\S*))?(?:[ \t]+([^\r\n]*))?/.exec(tail);
+                if (m && (i === 0 || s.buf[i - 1] === '\n')) hit = { i, m };
+                else from = i + marker.length;
+            }
+            if (!hit) return;
             settled = true;
             clearTimeout(timer); clearInterval(poll);
-            // marker 行格式：__SGOPS_AGENT_xxx__ <exitcode>
-            const tail = s.buf.slice(idx + marker.length, idx + marker.length + 8);
-            const codeMatch = /^\s*(-?\d+)/.exec(tail);
-            const output = stripAnsi(s.buf.slice(startLen, idx));
+            // marker 行格式：__SGOPS_AGENT_xxx__ <exitcode> <hostname> <ips...>（后两项识别嵌套 ssh 跳转后的有效主机）
+            const exitCode = Number(hit.m[1]);
+            const currentHost = hit.m[2] || null;
+            const currentIps = hit.m[3] ? hit.m[3].trim().split(/\s+/).filter(Boolean) : [];
+            s.where = { host: currentHost, ips: currentIps, at: Date.now() };
+            const output = stripAnsi(s.buf.slice(startLen, hit.i))
+                .split('\n').filter(l => !l.includes(marker)).join('\n');
             touch(s);
-            resolve({ ok: true, exitCode: codeMatch ? Number(codeMatch[1]) : null, output: output.slice(-6000), hostName: s.hostName });
+            resolve({ ok: true, exitCode, currentHost, currentIps, output: output.slice(-6000), hostName: s.hostName });
         }, 150);
 
         touch(s);
         try {
-            // 用前导空格降低 history/别名干扰；marker 打印退出码
-            s.stream.write(`${command}\nprintf '\\n%s %s\\n' '${marker}' $?\n`, 'utf8');
+            // 用前导空格降低 history/别名干扰；marker 打印退出码 + 当前 hostname/IP（识别用户嵌套 ssh 跳转）
+            s.stream.write(`${command}\nprintf '\\n%s %s %s %s\\n' '${marker}' $? "$(hostname 2>/dev/null)" "$(hostname -I 2>/dev/null || hostname -i 2>/dev/null)"\n`, 'utf8');
         } catch (err) {
             settled = true; clearTimeout(timer); clearInterval(poll);
             resolve({ ok: false, error: '写入失败：' + err.message });

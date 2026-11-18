@@ -2,7 +2,7 @@
  * AI 配置（独立页面 · 系统运维域）
  *
  * 承载两块能力：
- *   1. 模型配置：提供方（含主流模型清单）+ 接口地址 + 模型 + API Key + 连接测试
+ *   1. 模型配置：协议（OpenAI 兼容 / Anthropic）+ 自填接口地址 + 模型 + API Key + 连接测试
  *   2. Agent 能力：总开关、工具轮次、行数上限，以及各工具的启用状态
  *
  * 权限：页面随 ai 模块可见；模型 / Agent 的写入通道为管理员专属，
@@ -34,44 +34,50 @@ export function render() {
         <div class="card-header">
             <div>
                 <div class="card-title">模型接入</div>
-                <div class="card-desc">选择提供方自动带出地址与推荐模型 · API Key 加密存储，保存后仅掩码显示</div>
+                <div class="card-desc">可保存多个模型档案并随时切换 · 仅两种协议，地址与模型自填 · API Key 加密存储，保存后仅掩码显示</div>
             </div>
-            <span class="badge blue" id="ai-provider-current" style="display:none"></span>
+            <span class="badge blue" id="ai-protocol-current" style="display:none"></span>
         </div>
-        <div class="grid-2" style="align-items:start">
-            <div>
-                <div class="muted" style="font-size:12px;margin-bottom:8px">提供方（点击卡片切换，点模型名填入表单）</div>
-                <div class="ai-provider-grid" id="ai-provider-grid">
-                    <div class="muted" style="font-size:12.5px">加载中...</div>
+        <div style="max-width:760px">
+            <div class="ai-profile-bar">
+                <select class="select" id="ai-profile-select" title="选择要编辑 / 启用的模型档案"></select>
+                <button class="btn btn-ghost btn-sm" id="ai-profile-new" data-write>＋ 新建</button>
+                <button class="btn btn-ghost btn-sm" id="ai-profile-activate" data-write title="设为全局默认：所有未单独切换档案的用户使用该模型">设为默认</button>
+                <button class="btn btn-ghost btn-sm" id="ai-profile-delete" data-write>删除</button>
+            </div>
+            <div class="form-item">
+                <label>档案名称（便于识别，留空默认用模型名）</label>
+                <input class="input" id="ai-profile-name" placeholder="如：DeepSeek 官方 / 本地 Qwen / Claude">
+            </div>
+            <div class="ai-protocol-seg" id="ai-protocol-seg" role="tablist">
+                <button type="button" class="ai-protocol-opt" data-protocol="openai" role="tab">
+                    <strong>OpenAI 兼容</strong>
+                    <span>DeepSeek / 通义 / Kimi / Ollama / vLLM 等</span>
+                </button>
+                <button type="button" class="ai-protocol-opt" data-protocol="anthropic" role="tab">
+                    <strong>Anthropic</strong>
+                    <span>Claude 官方或兼容网关</span>
+                </button>
+            </div>
+            <div class="ai-protocol-hint" id="ai-protocol-hint"></div>
+            <div class="form-item" style="margin-top:14px">
+                <label>接口地址（Base URL，不含具体路径）</label>
+                <input class="input mono" id="ai-baseurl" placeholder="https://api.deepseek.com">
+            </div>
+            <div class="form-row">
+                <div class="form-item">
+                    <label>模型名称</label>
+                    <input class="input mono" id="ai-model" placeholder="deepseek-chat">
+                </div>
+                <div class="form-item">
+                    <label>API Key（留空表示不修改）</label>
+                    <input class="input" id="ai-key" type="password" placeholder="sk-..." autocomplete="off">
                 </div>
             </div>
-            <div>
-                <div class="form-row">
-                    <div class="form-item">
-                        <label>提供方</label>
-                        <select class="select" id="ai-provider"></select>
-                    </div>
-                    <div class="form-item">
-                        <label>接口地址</label>
-                        <input class="input mono" id="ai-baseurl" placeholder="https://api.deepseek.com">
-                    </div>
-                </div>
-                <div class="form-row">
-                    <div class="form-item">
-                        <label>模型名称</label>
-                        <input class="input mono" id="ai-model" placeholder="deepseek-chat" list="ai-model-list">
-                        <datalist id="ai-model-list"></datalist>
-                    </div>
-                    <div class="form-item">
-                        <label>API Key（留空表示不修改）</label>
-                        <input class="input" id="ai-key" type="password" placeholder="sk-..." autocomplete="off">
-                    </div>
-                </div>
-                <div class="toolbar" style="margin-top:10px">
-                    <span class="muted" id="ai-config-status" style="font-size:12px;margin-right:auto"></span>
-                    <button class="btn btn-ghost" id="ai-test" data-write>测试连接</button>
-                    <button class="btn btn-primary" id="ai-save-config" data-write>保存配置</button>
-                </div>
+            <div class="toolbar" style="margin-top:10px">
+                <span class="muted" id="ai-config-status" style="font-size:12px;margin-right:auto"></span>
+                <button class="btn btn-ghost" id="ai-test" data-write>测试连接</button>
+                <button class="btn btn-primary" id="ai-save-config" data-write>保存档案</button>
             </div>
         </div>
     </div>
@@ -176,67 +182,94 @@ export async function mount(root) {
     const $ = sel => root.querySelector(sel);
     const statusEl = $('#ai-config-status');
     const agStatusEl = $('#ag-status');
-    const providerSel = $('#ai-provider');
-    const providerGrid = $('#ai-provider-grid');
-    const modelList = $('#ai-model-list');
-    const currentBadge = $('#ai-provider-current');
+    const protocolSeg = $('#ai-protocol-seg');
+    const protocolHint = $('#ai-protocol-hint');
+    const currentBadge = $('#ai-protocol-current');
 
-    let providers = [];
     let agentCfg = null;
     let tools = [];
     let hasKey = false;
+    let protocol = 'openai';
+    let profiles = [];
+    let editingId = null;          // 正在编辑的档案 id；null = 未保存的新档案
+    let defaultProfileId = '';     // 全局默认档案 id
 
-    /* ---------------- 提供方卡片 ---------------- */
+    /* ---------------- 协议分段 ---------------- */
 
-    function paintProviders(currentProvider, currentModel) {
-        providerGrid.innerHTML = providers.map(p => {
-            const models = [...new Set([].concat(p.models || [], p.model ? [p.model] : []).filter(Boolean))];
-            const active = p.id === currentProvider;
-            return `
-            <div class="ai-provider-card ${active ? 'active' : ''}" data-provider="${esc(p.id)}">
-                <div class="ai-provider-head">
-                    <strong>${esc(p.label)}</strong>
-                    ${active ? '<span class="badge blue">当前</span>' : ''}
-                </div>
-                <div class="ai-provider-url mono">${esc(p.baseURL || '自定义地址')}</div>
-                <div class="ai-provider-models">
-                    ${models.length
-                    ? models.map(m => `<button class="ai-model-chip ${m === currentModel ? 'active' : ''}" data-model="${esc(m)}">${esc(m)}</button>`).join('')
-                    : '<span class="muted" style="font-size:11.5px">无预设模型，请手动填写模型名</span>'}
-                </div>
-            </div>`;
-        }).join('');
+    const PROTOCOL_META = {
+        openai: { label: 'OpenAI 兼容', endpoint: '{baseURL}/chat/completions', auth: 'Bearer 鉴权', placeholder: 'https://api.deepseek.com', modelEg: 'deepseek-chat' },
+        anthropic: { label: 'Anthropic', endpoint: '{baseURL}/v1/messages', auth: 'x-api-key 鉴权', placeholder: 'https://api.anthropic.com', modelEg: 'claude-3-5-sonnet-20241022' }
+    };
 
-        providerGrid.querySelectorAll('.ai-provider-card').forEach(card =>
-            card.addEventListener('click', e => {
-                const chip = e.target.closest('.ai-model-chip');
-                if (chip) {
-                    $('#ai-model').value = chip.dataset.model;
-                    toast(`已填入模型 ${chip.dataset.model}，保存后生效`, 'info');
-                    return;
-                }
-                applyProvider(card.dataset.provider);
-            }));
+    function paintProtocol() {
+        protocolSeg.querySelectorAll('.ai-protocol-opt').forEach(btn => {
+            const on = btn.dataset.protocol === protocol;
+            btn.classList.toggle('active', on);
+            btn.setAttribute('aria-selected', on ? 'true' : 'false');
+        });
+        const meta = PROTOCOL_META[protocol] || PROTOCOL_META.openai;
+        const dsHint = /deepseek\.com/i.test(String($('#ai-baseurl').value || ''))
+            ? '<span>· DeepSeek 官方模型名仅 deepseek-chat / deepseek-reasoner</span>' : '';
+        protocolHint.innerHTML = `请求端点 <code>${esc(meta.endpoint)}</code><span>· ${esc(meta.auth)}</span>${dsHint}`;
+        $('#ai-baseurl').placeholder = meta.placeholder;
+        $('#ai-model').placeholder = meta.modelEg;
+        paintBadge();
     }
 
-    function fillModelOptions(providerId) {
-        const p = providers.find(x => x.id === providerId) || {};
-        const models = [...new Set([].concat(p.models || [], p.model ? [p.model] : []).filter(Boolean))];
-        modelList.innerHTML = models.map(m => `<option value="${esc(m)}">`).join('');
+    function paintBadge() {
+        if (!currentBadge) return;
+        const meta = PROTOCOL_META[protocol] || PROTOCOL_META.openai;
+        const def = profiles.find(p => p.id === defaultProfileId);
+        currentBadge.style.display = '';
+        currentBadge.textContent = def
+            ? `默认：${def.name} · ${meta.label}`
+            : `当前：${meta.label}`;
     }
 
-    /** 切换提供方：自动带出该家的默认地址与推荐模型 */
-    function applyProvider(providerId) {
-        const p = providers.find(x => x.id === providerId);
-        if (!p) return;
-        providerSel.value = providerId;
-        if (p.baseURL) $('#ai-baseurl').value = p.baseURL;
-        fillModelOptions(providerId);
-        if (p.model) $('#ai-model').value = p.model;
-        paintProviders(providerId, $('#ai-model').value);
-        if (currentBadge) {
-            currentBadge.style.display = '';
-            currentBadge.textContent = `当前：${p.label}`;
+    function setProtocol(id) {
+        protocol = id === 'anthropic' ? 'anthropic' : 'openai';
+        paintProtocol();
+    }
+
+    /* ---------------- 模型档案 ---------------- */
+
+    function paintProfileBar() {
+        const sel = $('#ai-profile-select');
+        const opts = profiles.map(p =>
+            `<option value="${esc(p.id)}">${esc(p.name)}（${esc(p.model)}）${p.id === defaultProfileId ? ' · 默认' : ''}</option>`).join('');
+        sel.innerHTML = (editingId ? '' : '<option value="__new">＋ 新档案（未保存）</option>') + opts;
+        sel.value = editingId || '__new';
+        const isDefault = editingId && editingId === defaultProfileId;
+        $('#ai-profile-activate').disabled = !editingId || isDefault;
+        $('#ai-profile-delete').disabled = !editingId || isDefault;
+        $('#ai-profile-activate').title = isDefault ? '该档案已是全局默认' : '设为全局默认：所有未单独切换档案的用户使用该模型';
+        $('#ai-profile-delete').title = isDefault ? '默认档案不可删除，请先启用其它档案' : '删除该档案';
+        paintBadge();
+    }
+
+    function fillProfile(p) {
+        editingId = p ? p.id : null;
+        hasKey = !!(p && p.hasKey);
+        protocol = p && p.protocol === 'anthropic' ? 'anthropic' : 'openai';
+        $('#ai-profile-name').value = p ? p.name : '';
+        $('#ai-baseurl').value = p ? p.baseURL : '';
+        $('#ai-model').value = p ? p.model : '';
+        $('#ai-key').value = '';
+        $('#ai-key').placeholder = hasKey ? '已保存（留空保持不变）' : 'sk-...（本地服务可随意填）';
+        paintProtocol();
+        paintProfileBar();
+    }
+
+    function paintConfigStatus() {
+        const label = (PROTOCOL_META[protocol] || {}).label || protocol;
+        const def = profiles.find(p => p.id === defaultProfileId);
+        if (editingId) {
+            const p = profiles.find(x => x.id === editingId);
+            statusEl.textContent = `编辑档案「${(p && p.name) || ''}」 · ${label} · ${hasKey ? 'Key 已保存' : '未配置 Key'}${def ? ` · 全局默认：${def.name}` : ''}`;
+        } else {
+            statusEl.textContent = def
+                ? `新档案尚未保存 · 全局默认：${def.name}（${def.model}）`
+                : '尚无模型档案：填写后点「保存档案」，首个档案自动成为全局默认';
         }
     }
 
@@ -300,24 +333,22 @@ export async function mount(root) {
             const res = await api.ai.config.get();
             if (!res || !res.ok) { statusEl.textContent = '配置读取失败'; return; }
             const cfg = res.config || {};
-            providers = cfg.providers || [];
-            hasKey = !!cfg.hasKey;
-
-            providerSel.innerHTML = providers.map(p =>
-                `<option value="${esc(p.id)}"${p.id === cfg.provider ? ' selected' : ''}>${esc(p.label)}</option>`).join('');
-            $('#ai-baseurl').value = cfg.baseURL || '';
-            $('#ai-model').value = cfg.model || '';
-            $('#ai-key').value = '';
-            fillModelOptions(cfg.provider);
-            paintProviders(cfg.provider, cfg.model);
-
-            if (currentBadge) {
-                currentBadge.style.display = '';
-                currentBadge.textContent = `当前：${(providers.find(p => p.id === cfg.provider) || {}).label || cfg.provider}`;
+            profiles = cfg.profiles || [];
+            defaultProfileId = cfg.profileId || '';
+            const current = profiles.find(p => p.id === defaultProfileId) || profiles[0];
+            if (current) {
+                fillProfile(current);
+            } else {
+                // 无档案的自定义老配置：回显到新建表单
+                fillProfile(null);
+                protocol = cfg.protocol === 'anthropic' ? 'anthropic' : 'openai';
+                hasKey = !!cfg.hasKey;
+                $('#ai-baseurl').value = cfg.baseURL || '';
+                $('#ai-model').value = cfg.model || '';
+                $('#ai-key').placeholder = hasKey ? '已保存（留空保持不变）' : 'sk-...（本地服务可随意填）';
+                paintProtocol();
             }
-            statusEl.textContent = cfg.hasKey
-                ? `已配置 API Key（掩码显示） · ${cfg.provider} · ${cfg.model}`
-                : '尚未配置 API Key，AI 对话 / 脚本功能暂不可用';
+            paintConfigStatus();
         } catch (err) {
             statusEl.textContent = '配置读取失败：' + err.message;
         }
@@ -342,16 +373,59 @@ export async function mount(root) {
 
     /* ---------------- 事件绑定 ---------------- */
 
-    providerSel.addEventListener('change', () => applyProvider(providerSel.value));
+    protocolSeg.addEventListener('click', e => {
+        const btn = e.target.closest('.ai-protocol-opt');
+        if (btn) setProtocol(btn.dataset.protocol);
+    });
+    $('#ai-baseurl').addEventListener('input', paintProtocol);
+
+    $('#ai-profile-select').addEventListener('change', e => {
+        const id = e.target.value;
+        if (id === '__new') { fillProfile(null); paintConfigStatus(); return; }
+        const p = profiles.find(x => x.id === id);
+        if (p) { fillProfile(p); paintConfigStatus(); }
+    });
+
+    $('#ai-profile-new').addEventListener('click', () => {
+        if (!guardAdmin('新建模型档案')) return;
+        fillProfile(null);
+        paintConfigStatus();
+        $('#ai-profile-name').focus();
+    });
+
+    $('#ai-profile-activate').addEventListener('click', async () => {
+        if (!guardAdmin('启用模型档案')) return;
+        if (!editingId) return;
+        const res = await api.ai.profiles.activate(editingId);
+        if (res && res.ok) {
+            toast('已设为全局默认模型', 'success');
+            await loadConfig();
+            window.dispatchEvent(new CustomEvent('sgops:ai-profiles-changed'));
+        } else toast((res && res.message) || '启用失败', 'danger');
+    });
+
+    $('#ai-profile-delete').addEventListener('click', async () => {
+        if (!guardAdmin('删除模型档案')) return;
+        if (!editingId) return;
+        const p = profiles.find(x => x.id === editingId);
+        if (!confirm(`删除模型档案「${(p && p.name) || ''}」？正在使用该档案的用户将回落到全局默认`)) return;
+        const res = await api.ai.profiles.remove(editingId);
+        if (res && res.ok) {
+            toast('档案已删除', 'success');
+            await loadConfig();
+            window.dispatchEvent(new CustomEvent('sgops:ai-profiles-changed'));
+        } else toast((res && res.message) || '删除失败', 'danger');
+    });
 
     $('#ai-test').addEventListener('click', async () => {
         if (!guardAdmin('测试 AI 连接')) return;
+        if (!editingId) { toast('请先保存档案，再测试连接', 'warn'); return; }
         const btn = $('#ai-test');
         const old = btn.textContent;
         btn.disabled = true; btn.textContent = '测试中...';
         statusEl.textContent = '正在测试连接...';
         try {
-            const res = await api.ai.test($('#ai-model').value.trim());
+            const res = await api.ai.test($('#ai-model').value.trim(), editingId);
             statusEl.textContent = res.message || (res.ok ? '连接成功' : '连接失败');
             toast(res && res.ok ? '连接成功' : `连接失败：${(res && res.message) || ''}`, res && res.ok ? 'success' : 'danger');
         } catch (err) {
@@ -363,19 +437,26 @@ export async function mount(root) {
     });
 
     $('#ai-save-config').addEventListener('click', async () => {
-        if (!guardAdmin('保存 AI 配置')) return;
+        if (!guardAdmin('保存模型档案')) return;
         const btn = $('#ai-save-config');
         btn.disabled = true;
         try {
-            const res = await api.ai.config.save({
-                provider: providerSel.value,
+            const res = await api.ai.profiles.save({
+                id: editingId || undefined,
+                name: $('#ai-profile-name').value.trim(),
+                protocol,
                 baseURL: $('#ai-baseurl').value.trim(),
                 model: $('#ai-model').value.trim(),
                 apiKey: $('#ai-key').value
             });
             if (res && res.ok) {
-                toast('AI 模型配置已保存', 'success');
-                await loadConfig();
+                toast('模型档案已保存', 'success');
+                profiles = res.profiles || [];
+                defaultProfileId = (res.config && res.config.profileId) || '';
+                const saved = profiles.find(p => p.id === (res.profile && res.profile.id));
+                fillProfile(saved || null);
+                paintConfigStatus();
+                window.dispatchEvent(new CustomEvent('sgops:ai-profiles-changed'));
             } else {
                 toast((res && res.message) || '保存失败', 'danger');
                 statusEl.textContent = (res && res.message) || '保存失败';

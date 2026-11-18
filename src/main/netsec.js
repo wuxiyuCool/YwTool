@@ -144,6 +144,7 @@ async function sendAndLog(payload = {}) {
 const proxy = {
     server: null,
     port: 0,
+    startedAt: 0,
     breakpoints: false,
     httpsTunnel: true,
     stats: { requests: 0, tunnels: 0, bytes: 0 },
@@ -259,13 +260,47 @@ function logPacket(record) {
     proxy.stats.bytes += (record.body ? record.body.length : 0);
     addHistory({
         source: 'proxy',
+        ts: Date.now(),
         method: record.method,
         url: record.url,
         status: record.result === 'breakpoint-drop' ? 'dropped' : (record.status || record.result),
         durationMs: record.durationMs || 0,
-        sizeBytes: record.sizeBytes || 0
+        sizeBytes: record.sizeBytes || 0,
+        proc: record.proc ? record.proc.name : ''
     });
     pushEvent('packet', record);
+}
+
+/** 代理概况统计（供 AI Agent 排障用，只读，不含 header/body 明细）
+ *  口径拆分：thisRun=最近一次启动以来的实时计数；history=持久化滚动历史（含以往运行） */
+function trafficSummary(limit = HISTORY_CAP) {
+    const rows = store.list('apiHistory').filter(h => h.source === 'proxy').slice(0, limit);
+    const inRun = proxy.startedAt ? rows.filter(h => h.ts && h.ts >= proxy.startedAt) : [];
+    const errors = rows.filter(h => h.status === 'error' || h.status === 'dropped' || Number(h.status) >= 400);
+    const byProc = {};
+    rows.forEach(h => { const k = h.proc || '未知（旧记录或反查失败）'; byProc[k] = (byProc[k] || 0) + 1; });
+    return {
+        ok: true,
+        running: !!proxy.server,
+        port: proxy.port,
+        breakpoints: proxy.breakpoints,
+        sysproxyTakenOver: !!sysProxyPrev,
+        thisRun: {
+            note: proxy.server
+                ? '本次代理启动以来的计数（与界面统计条一致）'
+                : '上一次运行的收尾计数（代理当前已停止，界面流水表保留的就是这些）',
+            durationSec: proxy.server && proxy.startedAt ? Math.round((Date.now() - proxy.startedAt) / 1000) : 0,
+            requests: proxy.stats.requests, tunnels: proxy.stats.tunnels, bytes: proxy.stats.bytes,
+            historyRowsInThisRun: inRun.length
+        },
+        history: {
+            note: `持久化滚动历史（全平台上限 ${HISTORY_CAP} 条，跨多次代理运行；进程归属上线前的旧记录无进程名）`,
+            total: rows.length,
+            errorCount: errors.length,
+            recentErrors: errors.slice(0, 10).map(h => `${h.method} ${String(h.url).slice(0, 90)} → ${h.status}`),
+            byProc
+        }
+    };
 }
 
 /** 把一个 Record（{method, url, headers, body}）真正发出去并回写浏览器 socket */
@@ -319,7 +354,15 @@ function forwardToClient(socket, record) {
                     socket.write(body);
                     socket.end();
                 }
-                resolve({ status: upstream.statusCode, durationMs: Date.now() - startedAt, sizeBytes: size });
+                // 响应快照（前 64KB）随 packet 推送给界面做详情查看，不落历史库
+                const snap = body.subarray(0, 64 * 1024);
+                resolve({
+                    status: upstream.statusCode, durationMs: Date.now() - startedAt, sizeBytes: size,
+                    resStatusText: upstream.statusMessage || '',
+                    resHeaders: upstream.headers,
+                    resBody: snap.toString('base64'),
+                    resTruncated: body.length > snap.length
+                });
             });
             upstream.on('error', () => { if (!socket.destroyed) socket.destroy(); resolve({ result: 'upstream-error' }); });
         });
@@ -408,13 +451,15 @@ function handleConnect(req, clientSocket, head) {
     const startedAt = Date.now();
     const logTunnel = (ok, message) => {
         proxy.stats.tunnels++;
-        addHistory({
-            source: 'proxy', kind: 'connect',
-            method: 'CONNECT', url: `https://${host}:${port}`,
-            status: ok ? 'tunnel' : 'error', message: message || '',
-            durationMs: Date.now() - startedAt
-        });
         resolveProc(clientSocket.remotePort).then(proc => {
+            addHistory({
+                source: 'proxy', kind: 'connect',
+                ts: Date.now(),
+                method: 'CONNECT', url: `https://${host}:${port}`,
+                status: ok ? 'tunnel' : 'error', message: message || '',
+                durationMs: Date.now() - startedAt,
+                proc: proc ? proc.name : ''
+            });
             pushEvent('packet', {
                 id: store.uid('pk_'), kind: 'connect', at: store.nowText(), proc,
                 method: 'CONNECT', url: `${host}:${port}`,
@@ -464,6 +509,7 @@ function proxyStart(options = {}) {
         server.listen(port, '127.0.0.1', () => {
             proxy.server = server;
             proxy.port = port;
+            proxy.startedAt = Date.now();
             resolve({ ok: true, port, breakpoints: proxy.breakpoints });
         });
     });
@@ -479,6 +525,7 @@ function proxyStop() {
         try { proxy.server.close(); } catch (e) { /* ignore */ }
         proxy.server = null;
         proxy.port = 0;
+        proxy.startedAt = 0;
     }
     // 系统代理还接管着的话必须恢复，否则全局流量指向已关闭的端口
     if (sysProxyPrev) sysProxy({ action: 'off' }).catch(() => { });
@@ -503,7 +550,7 @@ function proxySetBreakpoints(enabled) {
 
 module.exports = {
     sendAndLog,
-    proxyStart, proxyStop, proxyStatus, proxySetBreakpoints, resolveBreakpoint, sysProxy,
+    proxyStart, proxyStop, proxyStatus, proxySetBreakpoints, resolveBreakpoint, sysProxy, trafficSummary,
     setEmitter: fn => { proxy.emitter = fn; },
     listHistory, clearHistory,
     listCases, saveCase, deleteCase

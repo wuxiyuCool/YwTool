@@ -193,6 +193,51 @@ export function render() {
         </div>
         ${sendPane()}${proxyPane()}${trafficPane()}${casesPane()}${historyPane()}
     </div>
+    <div class="modal-mask" id="pk-modal">
+        <div class="modal" style="width:880px;max-width:95vw">
+            <div class="modal-header">
+                <h3 id="pk-title">流水详情</h3>
+                <span class="muted" id="pk-at" style="font-size:11.5px;margin-left:10px"></span>
+                <button class="modal-close" data-pk-close>×</button>
+            </div>
+            <div class="modal-body" style="max-height:66vh;overflow:auto">
+                <div class="form-row">
+                    <div class="form-item" style="flex:0 0 110px">
+                        <label>方法（可改）</label>
+                        <input class="input mono" id="pk-method">
+                    </div>
+                    <div class="form-item" style="flex:1">
+                        <label>URL（可改）</label>
+                        <input class="input mono" id="pk-url">
+                    </div>
+                </div>
+                <div class="form-item">
+                    <label>请求 Headers（JSON，可改后重发）</label>
+                    <textarea class="textarea code-input" id="pk-headers" rows="6" spellcheck="false"></textarea>
+                </div>
+                <div class="form-item">
+                    <label>请求 Body（可改后重发）</label>
+                    <textarea class="textarea code-input" id="pk-body" rows="5" spellcheck="false"></textarea>
+                </div>
+                <div class="form-hint" id="pk-res-meta">响应</div>
+                <div class="form-item">
+                    <label>响应 Headers</label>
+                    <pre class="code-output" id="pk-res-headers" style="max-height:140px;overflow:auto">—</pre>
+                </div>
+                <div class="form-item">
+                    <label>响应 Body <span class="muted" id="pk-res-note"></span></label>
+                    <pre class="code-output" id="pk-res-body" style="max-height:200px;overflow:auto">—</pre>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-ghost btn-sm" id="pk-curl" title="复制为 curl 命令">复制 curl</button>
+                <button class="btn btn-ghost btn-sm" id="pk-load" title="填入「请求构造」标签页">载入请求构造</button>
+                <div class="spacer"></div>
+                <button class="btn btn-ghost" data-pk-close>关闭</button>
+                <button class="btn btn-primary" data-write id="pk-send">修改后重发</button>
+            </div>
+        </div>
+    </div>
     <div class="modal-mask" id="stream-modal">
         <div class="modal" style="width:860px;max-width:94vw">
             <div class="modal-header">
@@ -554,8 +599,8 @@ async function loadHistory() {
 
 function paintPackets() {
     const tbody = root.querySelector('#np-tbody');
-    tbody.innerHTML = packets.length ? packets.slice(0, 100).map(p => `
-        <tr>
+    tbody.innerHTML = packets.length ? packets.slice(0, 100).map((p, i) => `
+        <tr data-idx="${i}" style="cursor:pointer" title="点击查看请求/响应详情并重发">
             <td class="muted" style="font-size:12px">${esc(p.at || '')}</td>
             <td>${esc(p.method || '')}</td>
             <td class="mono" style="font-size:12px;word-break:break-all">${esc(p.url)}</td>
@@ -564,6 +609,82 @@ function paintPackets() {
             <td class="muted">${p.sizeBytes ? esc((p.sizeBytes / 1024).toFixed(1)) + ' KB' : '-'}</td>
             <td class="muted" style="font-size:11.5px" title="${p.proc ? 'PID ' + p.proc.pid : ''}">${esc(p.proc ? p.proc.name.replace(/\.exe$/i, '') : '-')}</td>
         </tr>`).join('') : emptyRow(7, '等待流量...');
+}
+
+/* ---------------- 流水详情弹窗 ---------------- */
+
+let pkCurrent = null;
+
+function openPacketDetail(idx) {
+    const p = packets[idx];
+    if (!p || p.id === 'sys_stop') return;
+    pkCurrent = p;
+    const isHttp = p.kind !== 'connect';
+    root.querySelector('#pk-title').textContent = isHttp ? `${p.method} 详情` : 'CONNECT 隧道详情';
+    root.querySelector('#pk-at').textContent = `${p.at || ''}${p.proc ? ` · ${p.proc.name}(${p.proc.pid})` : ''}`;
+    root.querySelector('#pk-method').value = p.method || '';
+    root.querySelector('#pk-url').value = p.url || '';
+    root.querySelector('#pk-method').disabled = !isHttp;
+    root.querySelector('#pk-url').disabled = !isHttp;
+    root.querySelector('#pk-headers').value = isHttp ? JSON.stringify(p.headers || {}, null, 2) : '（隧道连接不解析内容）';
+    root.querySelector('#pk-body').value = isHttp && p.body ? b64ToText(p.body) : '';
+    const meta = [];
+    if (p.status) meta.push(statusBadge(p.status), esc(String(p.statusText || p.resStatusText || '')));
+    if (p.durationMs) meta.push(`<span class="muted">${esc(p.durationMs)} ms</span>`);
+    if (p.sizeBytes) meta.push(`<span class="muted">${(p.sizeBytes / 1024).toFixed(1)} KB</span>`);
+    if (p.result && p.result !== 'forwarded') meta.push(`<span class="muted">${esc(p.result)}</span>`);
+    root.querySelector('#pk-res-meta').innerHTML = meta.length ? `响应：${meta.join(' ')}` : '响应：—';
+    root.querySelector('#pk-res-headers').textContent = p.resHeaders ? JSON.stringify(p.resHeaders, null, 2) : '（无快照：CONNECT 隧道、失败请求或本功能上线前的记录）';
+    const resText = p.resBody ? b64ToText(p.resBody) : '';
+    let shown = resText || '—';
+    if (resText && /json/i.test(String((p.resHeaders || {})['content-type'] || ''))) {
+        try { shown = JSON.stringify(JSON.parse(resText), null, 2); } catch (e) { /* 原样 */ }
+    }
+    root.querySelector('#pk-res-body').textContent = shown;
+    root.querySelector('#pk-res-note').textContent = p.resTruncated ? '（前 64KB 快照，已截断）' : '';
+    root.querySelector('#pk-send').style.display = isHttp ? '' : 'none';
+    root.querySelector('#pk-modal').classList.add('open');
+}
+
+function closePacketDetail() {
+    root.querySelector('#pk-modal').classList.remove('open');
+    pkCurrent = null;
+}
+
+async function packetReplay() {
+    if (!guardAdmin('重放请求')) return;
+    let headers;
+    try { headers = JSON.parse(root.querySelector('#pk-headers').value || '{}'); } catch (e) { toast('请求 Headers 不是合法 JSON', 'warn'); return; }
+    const req = {
+        method: root.querySelector('#pk-method').value.trim().toUpperCase(),
+        url: root.querySelector('#pk-url').value.trim(),
+        headers,
+        body: root.querySelector('#pk-body').value,
+        timeoutMs: 30000
+    };
+    if (!req.url) { toast('URL 不能为空', 'warn'); return; }
+    const btn = root.querySelector('#pk-send');
+    btn.disabled = true; btn.textContent = '发送中…';
+    try {
+        const res = await api.netsec.send(req);
+        const meta = root.querySelector('#pk-res-meta');
+        if (res && res.ok) {
+            meta.innerHTML = `响应（本次重发）：${statusBadge(res.status)} <span class="muted">${esc(res.statusText || '')} · ${esc(res.durationMs)} ms · ${(res.sizeBytes / 1024).toFixed(1)} KB${res.truncated ? ' · 超 5MB 截断' : ''}</span>`;
+            root.querySelector('#pk-res-headers').textContent = JSON.stringify(res.headers || {}, null, 2);
+            let body = String(res.body || '');
+            if (/json/i.test(String((res.headers || {})['content-type'] || ''))) {
+                try { body = JSON.stringify(JSON.parse(body), null, 2); } catch (e) { /* 原样 */ }
+            }
+            root.querySelector('#pk-res-body').textContent = body || '(空响应体)';
+            root.querySelector('#pk-res-note').textContent = '';
+            toast('重发完成，响应已更新', 'success');
+        } else {
+            meta.innerHTML = `响应（本次重发）：<span class="badge red">失败</span> <span class="muted">${esc((res && res.message) || '未知错误')}</span>`;
+        }
+        loadHistory();
+    } finally {
+        btn.disabled = false; btn.textContent = '修改后重发';
+    }
 }
 
 /* ---------------- 流量分析（类 Wireshark） ---------------- */
@@ -784,9 +905,45 @@ export async function mount(r) {
     root.querySelector('#np-stop').addEventListener('click', async () => {
         if (!guardAdmin('停止抓包代理')) return;
         await api.netsec.proxy.stop();
+        packets.unshift({ id: 'sys_stop', at: new Date().toLocaleString('zh-CN', { hour12: false }), method: '—', url: '代理已停止（下表为此前抓到的记录，启动后继续刷新）', result: 'stopped' });
+        paintPackets();
         await refreshProxyStatus();
     });
     root.querySelector('#np-clear').addEventListener('click', () => { packets = []; paintPackets(); });
+
+    /* 流水详情：点击行查看/编辑/重发 */
+    root.querySelector('#np-tbody').addEventListener('click', e => {
+        const tr = e.target.closest('tr[data-idx]');
+        if (tr) openPacketDetail(Number(tr.dataset.idx));
+    });
+    root.querySelectorAll('#pk-modal [data-pk-close]').forEach(el => el.addEventListener('click', closePacketDetail));
+    root.querySelector('#pk-modal').addEventListener('click', e => { if (e.target === e.currentTarget) closePacketDetail(); });
+    root.querySelector('#pk-send').addEventListener('click', packetReplay);
+    root.querySelector('#pk-load').addEventListener('click', () => {
+        let headers = {};
+        try { headers = JSON.parse(root.querySelector('#pk-headers').value || '{}'); } catch (e) { toast('请求 Headers 不是合法 JSON', 'warn'); return; }
+        fillForm({
+            method: root.querySelector('#pk-method').value.trim().toUpperCase(),
+            url: root.querySelector('#pk-url').value.trim(),
+            headers,
+            body: root.querySelector('#pk-body').value
+        });
+        closePacketDetail();
+        toast('已填入请求构造', 'info');
+    });
+    root.querySelector('#pk-curl').addEventListener('click', () => {
+        let headers = {};
+        try { headers = JSON.parse(root.querySelector('#pk-headers').value || '{}'); } catch (e) { toast('请求 Headers 不是合法 JSON', 'warn'); return; }
+        const cmd = buildCurl({
+            method: root.querySelector('#pk-method').value.trim().toUpperCase(),
+            url: root.querySelector('#pk-url').value.trim(),
+            headers,
+            body: root.querySelector('#pk-body').value
+        });
+        navigator.clipboard.writeText(cmd)
+            .then(() => toast('curl 命令已复制', 'success'))
+            .catch(() => toast('复制失败', 'danger'));
+    });
 
     /* 断点开关运行时切换（不必重启代理） */
     root.querySelector('#np-breakpoints').addEventListener('change', async e => {

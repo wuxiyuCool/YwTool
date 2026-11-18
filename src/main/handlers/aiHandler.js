@@ -36,6 +36,9 @@ const APPROVAL_TIMEOUT_MS = 120 * 1000;
 const pendingApprovals = new Map();
 let approvalSeq = 0;
 
+/** username → AbortController：进行中的对话，供「停止生成」中止 */
+const activeChats = new Map();
+
 /** 推送审批请求到渲染层，等待用户同意/拒绝；超时或窗口销毁视为拒绝 */
 function requestApproval(sender, info) {
     return new Promise(resolve => {
@@ -153,29 +156,65 @@ function setup(ipcMain) {
         const result = ai.saveConfig(payload);
         if (result.ok) {
             const cfg = ai.publicConfig();
-            log(`更新 AI 模型配置（${cfg.provider} · ${cfg.model}）`);
+            log(`更新 AI 模型配置（${cfg.protocol} · ${cfg.model}）`);
         }
         return result;
     });
 
-    ipcMain.handle('ai:test', async (e, { model } = {}) => {
-        const result = await ai.testConnection(model);
+    ipcMain.handle('ai:test', async (e, { model, profileId } = {}) => {
+        const result = await ai.testConnection(model, profileId);
         log(`AI 连接测试：${result.message}`, result.ok ? 'success' : 'failed');
         return result;
+    });
+
+    /* ---------------- 模型档案（管理员维护，全员可切换本人使用的档案） ---------------- */
+
+    ipcMain.handle('ai:profiles:save', (e, payload = {}) => {
+        const result = ai.saveProfile(payload);
+        if (result.ok) log(`${payload.id ? '修改' : '新增'} AI 模型档案「${result.profile.name}」（${result.profile.protocol} · ${result.profile.model}）`);
+        return result;
+    });
+
+    ipcMain.handle('ai:profiles:delete', (e, { id } = {}) => {
+        const prof = ai.listProfiles().find(p => p.id === id);
+        const result = ai.deleteProfile(id);
+        if (result.ok) log(`删除 AI 模型档案「${(prof || {}).name || id}」`);
+        return result;
+    });
+
+    ipcMain.handle('ai:profiles:activate', (e, { id } = {}) => {
+        const result = ai.activateProfile(id);
+        if (result.ok) log(`启用 AI 模型档案「${result.config.profileName}」为全局默认`);
+        return result;
+    });
+
+    /** 用户切换本人会话使用的档案（写操作；清掉旧档案下的模型名覆盖） */
+    ipcMain.handle('ai:profile:use', (e, { id } = {}) => {
+        const user = operator();
+        const result = ai.useProfile(user, String(id || '').trim());
+        if (!result.ok) return result;
+        const cfg = ai.getConfig(user);
+        log(`切换 AI 模型档案：${cfg.profileName || '全局默认'}`);
+        return { ok: true, profileId: cfg.profileId, model: ai.resolveModel(user), protocol: cfg.protocol, label: cfg.label };
     });
 
     /* ---------------- 模型切换（用户级偏好） ---------------- */
 
     ipcMain.handle('ai:model:get', () => {
-        const cfg = ai.getConfig();
-        const prefs = ai.getUserPrefs(operator());
+        const user = operator();
+        const cfg = ai.getConfig(user);
+        const prefs = ai.getUserPrefs(user);
         return {
             ok: true,
-            provider: cfg.provider,
+            protocol: cfg.protocol,
+            label: cfg.label,
             configured: cfg.configured,
             defaultModel: cfg.model,
-            model: ai.resolveModel(operator()),
-            providers: ai.PROVIDERS,
+            model: ai.resolveModel(user),
+            protocols: ai.PROTOCOLS,
+            profiles: ai.listProfiles(),
+            profileId: cfg.profileId,
+            defaultProfileId: (store.get('aiConfig') || {}).profileId || '',
             prefs
         };
     });
@@ -265,6 +304,12 @@ function setup(ipcMain) {
         const send = payload => {
             if (!sender.isDestroyed()) sender.send(payload.channel || 'ai:stream', payload);
         };
+        const controller = new AbortController();
+        activeChats.set(user, controller);
+        const onRetry = msg => {
+            log(`AI 请求瞬时故障，自动重试一次：${msg}`);
+            send({ channel: 'ai:stream', delta: '', retry: true });
+        };
         try {
             // Agent 最终以服务端解析为准：即使前端被篡改也拿不到未授权的 Agent 能力
             const state = ai.agentState(user);
@@ -281,6 +326,8 @@ function setup(ipcMain) {
                     system,
                     agent: state.global,
                     scope: cleanScope,
+                    signal: controller.signal,
+                    onRetry,
                     // 审批回路：高危执行前推 ai:approval，等待渲染层 ai:approval:reply（120s 超时视为拒绝）
                     approve: state.global.execApproval === false ? null : info => requestApproval(sender, info),
                     onDelta: delta => send({ channel: 'ai:stream', delta }),
@@ -290,7 +337,10 @@ function setup(ipcMain) {
             } else {
                 text = await ai.chatStream(list, {
                     model: ai.resolveModel(user),
+                    user,
                     system,
+                    signal: controller.signal,
+                    onRetry,
                     onDelta: delta => send({ channel: 'ai:stream', delta })
                 });
             }
@@ -302,9 +352,23 @@ function setup(ipcMain) {
             log(`AI ${useAgent ? 'Agent ' : ''}对话（${Math.round((Date.now() - started) / 1000)}s · ${Math.round(text.length / 100) * 100} 字符）`);
             return { ok: true, text, agent: useAgent, durationMs: Date.now() - started };
         } catch (err) {
+            if (controller.signal.aborted || err.aborted) {
+                log('AI 对话被用户中止');
+                return { ok: false, aborted: true, message: '已中止生成' };
+            }
             log(`AI 对话失败：${err.message}`, 'failed');
             return { ok: false, message: err.message };
+        } finally {
+            activeChats.delete(user);
         }
+    });
+
+    /** 停止当前用户进行中的对话（中止 fetch 与 Agent 循环） */
+    ipcMain.handle('ai:chat:abort', () => {
+        const controller = activeChats.get(operator());
+        if (!controller) return { ok: false, message: '当前没有进行中的对话' };
+        controller.abort();
+        return { ok: true };
     });
 
     /** 用户对 Agent 高危执行的审批回执：同意/拒绝 → resolve 对应 requestApproval */
@@ -418,7 +482,7 @@ function setup(ipcMain) {
             const { text } = await ai.complete([{
                 role: 'user',
                 content: `请为内网运维场景生成一个 ${scriptType} 脚本。\n需求：${req}\n要求：只输出脚本本体，必要说明放在脚本后的「说明：」里，不超过 5 条。`
-            }]);
+            }], { user: operator() });
             const { script, explanation } = extractScript(text);
             log(`AI 生成脚本（${scriptType}）`, 'success');
             return { ok: true, script, explanation, type: scriptType, durationMs: Date.now() - started };
@@ -441,7 +505,7 @@ function setup(ipcMain) {
                     `优化要求：修复潜在问题、提升健壮性（错误处理/参数校验/幂等）、保持原有功能与风格。${hint ? `\n补充诉求：${hint}` : ''}\n\n` +
                     `---- 脚本开始 ----\n${body}\n---- 脚本结束 ----\n\n` +
                     `只输出优化后的完整脚本本体，修改要点放在脚本后的「修改说明：」里，不超过 5 条。`
-            }]);
+            }], { user: operator() });
             const { script, explanation } = extractScript(text);
             log(`AI 优化脚本「${name || '-'}」`, 'success');
             return { ok: true, script, explanation, type: scriptType, durationMs: Date.now() - started };

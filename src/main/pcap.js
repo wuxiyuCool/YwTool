@@ -409,6 +409,51 @@ function closeFile() {
     return { ok: true };
 }
 
+/** 聚合分析当前已打开的流量包（供 AI Agent 排障用，只读、不接收路径参数） */
+function analyze() {
+    if (!session) return { ok: false, error: '用户尚未在「安全运维 → 网络安全 → 流量分析」打开流量包：请提示用户先打开 .pcap/.pcapng 文件后再来分析' };
+    const protocols = {};
+    const bytesByHost = new Map();
+    const bytesByFlow = new Map();
+    const httpErrors = [];
+    const snis = new Set();
+    let rst = 0, synNoAck = 0;
+    const synFlows = new Set();
+    const ackedFlows = new Set();
+    for (const p of session.packets) {
+        protocols[p.proto] = (protocols[p.proto] || 0) + 1;
+        if (p.src) bytesByHost.set(p.src, (bytesByHost.get(p.src) || 0) + p.len);
+        if (p.dst) bytesByHost.set(p.dst, (bytesByHost.get(p.dst) || 0) + p.len);
+        if (p.flow && /^[TU]:/.test(p.flow)) bytesByFlow.set(p.flow, (bytesByFlow.get(p.flow) || 0) + p.len);
+        if ((p.info || '').includes('RST')) rst++;
+        if (p.proto === 'TCP') {
+            if (p.info.includes('SYN') && !p.info.includes('ACK')) synFlows.add(p.flow);
+            if (p.info.includes('SYN,ACK')) ackedFlows.add(p.flow);
+        }
+        if (p.proto === 'HTTP') {
+            const m = /HTTP\/[\d.]+ (\d{3})/.exec(p.info || '');
+            if (m && Number(m[1]) >= 400 && httpErrors.length < 20) httpErrors.push(`${m[1]} ${p.src}→${p.dst}`);
+        }
+        const sni = /SNI=(\S+)/.exec(p.info || '');
+        if (sni) snis.add(sni[1]);
+    }
+    for (const f of synFlows) if (!ackedFlows.has(f)) synNoAck++;
+    const top = (map, n) => [...map.entries()].sort((a, b) => b[1] - a[1]).slice(0, n).map(([k, v]) => ({ key: k, bytes: v }));
+    const first = session.packets[0], last = session.packets[session.packets.length - 1];
+    return {
+        ok: true,
+        file: path.basename(session.file),
+        total: session.packets.length,
+        spanSec: first && last ? Math.round((last.ts - first.ts) / 100) / 10 : 0,
+        protocols,
+        topHosts: top(bytesByHost, 8),
+        topFlows: top(bytesByFlow, 8),
+        anomalies: { rstSegments: rst, synNoAckFlows: synNoAck, httpErrors },
+        tlsSniHosts: [...snis].slice(0, 10),
+        truncated: session.truncated
+    };
+}
+
 /* ================= 实时抓包（tshark/dumpcap 子进程） ================= */
 
 const TOOL_NAMES = ['tshark.exe', 'dumpcap.exe'];
@@ -538,6 +583,6 @@ function liveStop() {
 
 module.exports = {
     setEmitter: fn => { pushEvent = fn; },
-    openFile, listPackets, getDetail, followStream, closeFile,
+    openFile, listPackets, getDetail, followStream, closeFile, analyze,
     toolInfo, listInterfaces, liveStart, liveStop
 };

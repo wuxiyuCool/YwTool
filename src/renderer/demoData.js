@@ -190,16 +190,19 @@ export const demoEnv = {
 export const demoAiConfig = {
     ok: true,
     config: {
-        provider: 'deepseek',
+        protocol: 'openai',
         baseURL: 'https://api.deepseek.com',
         model: 'deepseek-chat',
         hasKey: true,
-        providers: [
-            { id: 'deepseek', label: 'DeepSeek 深度求索', baseURL: 'https://api.deepseek.com', model: 'deepseek-chat', models: ['deepseek-chat', 'deepseek-reasoner'] },
-            { id: 'qwen', label: '通义千问（阿里云百炼）', baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen-plus', models: ['qwen-turbo', 'qwen-plus', 'qwen-max'] },
-            { id: 'kimi', label: 'Kimi（Moonshot）', baseURL: 'https://api.moonshot.cn/v1', model: 'moonshot-v1-8k', models: ['moonshot-v1-8k', 'moonshot-v1-32k'] },
-            { id: 'ollama', label: 'Ollama（本地私有化）', baseURL: 'http://localhost:11434/v1', model: 'llama3.1', models: ['llama3.1', 'qwen2.5'] },
-            { id: 'custom', label: '自定义（OpenAI 兼容）', baseURL: '', model: '', models: [] }
+        profileId: 'ap_demo1',
+        profileName: 'DeepSeek 官方',
+        profiles: [
+            { id: 'ap_demo1', name: 'DeepSeek 官方', protocol: 'openai', baseURL: 'https://api.deepseek.com', model: 'deepseek-chat', hasKey: true, active: true, createdAt: '2026-09-18 09:00' },
+            { id: 'ap_demo2', name: '本地 Qwen', protocol: 'openai', baseURL: 'http://127.0.0.1:8080/v1', model: 'qwen2.5-7b-instruct', hasKey: false, active: false, createdAt: '2026-10-02 14:30' }
+        ],
+        protocols: [
+            { id: 'openai', label: 'OpenAI 兼容', hint: 'DeepSeek / 通义 / Kimi / 智谱 / Ollama / vLLM 等绝大多数网关' },
+            { id: 'anthropic', label: 'Anthropic', hint: 'Claude 官方或兼容 /v1/messages 的网关' }
         ]
     }
 };

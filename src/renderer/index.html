@@ -79,9 +79,13 @@
                             <span class="ai-bar-label">角色</span>
                             <select class="select" id="ai-role-select" title="切换提示词角色（在「AI 配置」页可维护角色）"></select>
                         </div>
+                        <div class="ai-bar-item ai-bar-profile">
+                            <span class="ai-bar-label">档案</span>
+                            <select class="select" id="ai-profile-switch" title="切换模型档案（在「AI 配置」页维护，仅影响本人会话）"></select>
+                        </div>
                         <div class="ai-bar-item ai-bar-model">
                             <span class="ai-bar-label">模型</span>
-                            <select class="select" id="ai-model-select" title="切换本次会话使用的模型"></select>
+                            <input class="input ai-model-input" id="ai-model-input" spellcheck="false" autocomplete="off" title="自填模型名，回车切换（仅影响本人会话）">
                         </div>
                         <div class="ai-bar-item ai-bar-agent" id="ai-agent-wrap" title="开启后 AI 可调用平台工具：查询主机 / 数据源与表结构 / 脚本清单 / 生成数据 / 保存脚本 / 本机与远程命令 / 查询容器">
                             <span class="ai-bar-label">Agent</span>
@@ -124,6 +128,7 @@
                     <div class="ai-quick" id="ai-quick"></div>
                     <div class="ai-input-bar">
                         <textarea class="ai-input" id="ai-input" rows="2" placeholder="描述你的运维问题，AI 会结合当前页面上下文回答…"></textarea>
+                        <button class="btn btn-danger" id="ai-stop" style="display:none" title="停止当前生成（保留已输出内容）">停止</button>
                         <button class="btn btn-primary" id="ai-send">发送</button>
                     </div>
                     <div class="ai-foot-hint">Enter 发送 · Shift+Enter 换行 · 回答仅供参考，执行前请人工确认</div>

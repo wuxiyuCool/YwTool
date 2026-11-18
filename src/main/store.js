@@ -39,13 +39,16 @@ function seeds() {
             // 凭据保存时自动同步到外置密钥文件（v1: 密文落盘）
             secretsAutoSync: true
         },
-        // AI 模型配置（apiKey 为密文，出参一律掩码）
+        // AI 模型配置（apiKey 为密文，出参一律掩码；profileId 指向启用的模型档案，空串=自定义配置）
         aiConfig: {
-            provider: 'deepseek',
-            baseURL: 'https://api.deepseek.com',
+            protocol: 'openai',
+            baseURL: '',
             apiKey: '',
-            model: 'deepseek-chat'
+            model: '',
+            profileId: ''
         },
+        // AI 模型档案：可保存多个大模型接入（name/protocol/baseURL/model/apiKey 密文），管理员维护、用户可切换
+        aiProfiles: [],
         // AI 对话历史：{ username: [{ role, content, at }] }
         aiChats: {},
         // Agent 全局能力配置（能力默认收紧，由管理员在「AI 配置」页放开）
@@ -295,6 +298,23 @@ function migrate() {
 
     // AI 模型配置 / 对话历史（老库没有 → 补默认）
     if (!db.aiConfig || typeof db.aiConfig !== 'object') { db.aiConfig = defaults.aiConfig; changed = true; }
+    if (!Array.isArray(db.aiProfiles)) { db.aiProfiles = []; changed = true; }
+    // 老库单配置 → 首个模型档案（地址/模型/密文原样保留；profileId 已存在说明迁移过或是自定义配置，不重复播种）
+    if (db.aiConfig.profileId === undefined && !db.aiProfiles.length && db.aiConfig.baseURL && db.aiConfig.model) {
+        const pid = 'ap_' + Date.now().toString(36);
+        db.aiProfiles.push({
+            id: pid,
+            name: db.aiConfig.model,
+            protocol: db.aiConfig.protocol || 'openai',
+            baseURL: db.aiConfig.baseURL,
+            apiKey: db.aiConfig.apiKey || '',
+            model: db.aiConfig.model,
+            createdAt: nowText()
+        });
+        db.aiConfig.profileId = pid;
+        changed = true;
+    }
+    if (db.aiConfig.profileId === undefined) { db.aiConfig.profileId = ''; changed = true; }
     if (!db.aiChats || typeof db.aiChats !== 'object' || Array.isArray(db.aiChats)) { db.aiChats = {}; changed = true; }
     // Agent 配置 / 用户级 AI 偏好（老库补默认值，缺失字段由 ai.getAgentConfig 兜底）
     if (!db.aiAgent || typeof db.aiAgent !== 'object' || Array.isArray(db.aiAgent)) { db.aiAgent = defaults.aiAgent; changed = true; }
@@ -386,7 +406,7 @@ function upsert(coll, item) {
     const prefix = {
         hosts: 'h_', scripts: 's_', rules: 'r_', accounts: 'a_', users: 'u_',
         dbSources: 'd_', tasks: 'T-', etlTasks: 'et_', etlRuns: 'er_', sqlScripts: 'sq_',
-        dockerHosts: 'dh_', aiRoles: 'ar_', kubeClusters: 'kc_'
+        dockerHosts: 'dh_', aiRoles: 'ar_', aiProfiles: 'ap_', kubeClusters: 'kc_'
     }[coll] || 'x_';
     if (item.id) {
         const idx = arr.findIndex(x => x.id === item.id);

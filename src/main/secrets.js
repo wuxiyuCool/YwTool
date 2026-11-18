@@ -80,7 +80,7 @@ function resolve(key, storedCipher) {
 function aiOverride() {
     const ai = load().ai || {};
     const out = {};
-    ['apiKey', 'baseURL', 'model', 'provider'].forEach(k => {
+    ['apiKey', 'baseURL', 'model', 'protocol'].forEach(k => {
         if (ai[k] && String(ai[k]).trim()) out[k] = String(ai[k]).trim();
     });
     if (out.apiKey) out.apiKey = value(out.apiKey);
@@ -105,7 +105,7 @@ function status() {
 
 const TEMPLATE = {
     _说明: 'SgOps 外置密钥文件。值可为明文，或界面「加密工具」生成的 v1: 密文（仅本机可解）。改完自动生效，无需重启。',
-    ai: { apiKey: '', baseURL: '', model: '', provider: '' },
+    ai: { apiKey: '', baseURL: '', model: '', protocol: '' },
     secrets: {
         'db:d_01': '',
         'host:h_04': '',

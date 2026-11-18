@@ -92,10 +92,11 @@ const validChannels = [
 
     // AI 助手（配置 / 对话 / 会话管理 / 模型切换 / Agent 能力 / 脚本生成与优化）
     'ai:config:get', 'ai:config:save', 'ai:test',
-    'ai:chat', 'ai:chat:history', 'ai:chat:clear',
+    'ai:chat', 'ai:chat:history', 'ai:chat:clear', 'ai:chat:abort',
     'ai:sessions:list', 'ai:sessions:new', 'ai:sessions:switch', 'ai:sessions:delete',
     'ai:script:generate', 'ai:script:optimize',
     'ai:model:get', 'ai:model:save',
+    'ai:profiles:save', 'ai:profiles:delete', 'ai:profiles:activate', 'ai:profile:use',
     'ai:agent:get', 'ai:agent:save', 'ai:agent:toggle', 'ai:agent:tools',
     'ai:approval:reply',
     'ai:roles:list', 'ai:roles:save', 'ai:roles:delete', 'ai:role:save'

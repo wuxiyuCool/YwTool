@@ -47,6 +47,8 @@ const ADMIN_ONLY = new Set([
     'sqlScripts:save', 'sqlScripts:delete',
     'dbconfig:save', 'dbconfig:delete', 'dbconfig:import',
     'ai:config:save', 'ai:test',
+    // 模型档案的增删与全局默认启用属平台级配置，仅管理员（用户切换本人档案走 ai:profile:use 写操作）
+    'ai:profiles:save', 'ai:profiles:delete', 'ai:profiles:activate',
     // 提示词角色定义属平台级配置（会话/权限不受影响），仅管理员维护
     'ai:roles:save', 'ai:roles:delete',
     // 数据集成（ETL）：批量写库与数据外流均属高危，仅管理员
@@ -62,7 +64,7 @@ const ADMIN_ONLY = new Set([
     'ai:agent:save'
 ]);
 
-const WRITE_PATTERN = /:(save|delete|toggle|run|runNow|runScript|exec|execOne|reset|reveal|cleanup|append|lint|loginTest|ack|ackAll|test|password|export|import|chat|generate|optimize|clear|new|switch|open)$/;
+const WRITE_PATTERN = /:(save|delete|toggle|run|runNow|runScript|exec|execOne|reset|reveal|cleanup|append|lint|loginTest|ack|ackAll|test|password|export|import|chat|abort|generate|optimize|clear|new|switch|open|activate|use)$/;
 
 /** 会话容器：本地单机部署，按用户名维护，支持多人分别登录（如同时开多个窗口） */
 const sessions = new Map();

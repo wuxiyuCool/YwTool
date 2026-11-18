@@ -123,11 +123,20 @@ function demoFallback(channel, data) {
         case 'ai:script:optimize': return demo.demoAiScript;
         case 'ai:model:get':
             return {
-                ok: true, provider: 'deepseek', configured: true,
+                ok: true, protocol: 'openai', label: 'OpenAI 兼容', configured: true,
                 defaultModel: 'deepseek-chat', model: 'deepseek-chat',
-                providers: demo.demoAiConfig.config.providers, prefs: {}
+                protocols: demo.demoAiConfig.config.protocols,
+                profiles: demo.demoAiConfig.config.profiles,
+                profileId: demo.demoAiConfig.config.profileId,
+                defaultProfileId: demo.demoAiConfig.config.profileId,
+                prefs: {}
             };
         case 'ai:model:save': return { ok: true, model: (data && data.model) || 'deepseek-chat' };
+        case 'ai:profiles:save': return { ok: true, profile: { id: 'ap_demo_new', name: (data && data.name) || '新档案' }, profiles: demo.demoAiConfig.config.profiles, config: demo.demoAiConfig.config };
+        case 'ai:profiles:delete': return { ok: true, profiles: demo.demoAiConfig.config.profiles, config: demo.demoAiConfig.config };
+        case 'ai:profiles:activate': return { ok: true, config: demo.demoAiConfig.config };
+        case 'ai:profile:use': return { ok: true, profileId: (data && data.id) || '', model: 'deepseek-chat', protocol: 'openai', label: 'OpenAI 兼容' };
+        case 'ai:chat:abort': return { ok: true };
         case 'ai:agent:get':
             return {
                 ok: true, enabled: false, userPref: null,
@@ -619,8 +628,10 @@ export const api = {
             get: () => invoke('ai:config:get'),
             save: payload => invoke('ai:config:save', payload)
         },
-        test: model => invoke('ai:test', { model }),
+        test: (model, profileId) => invoke('ai:test', { model, profileId }),
         chat: (messages, agent = false, role = '', scope = null) => invoke('ai:chat', { messages, agent, role, scope }),
+        /** 停止当前进行中的对话（中止生成） */
+        chatAbort: () => invoke('ai:chat:abort'),
         /** Agent 高危执行审批：回传用户决定 */
         approvalReply: (requestId, approved) => invoke('ai:approval:reply', { requestId, approved }),
         chatHistory: () => invoke('ai:chat:history'),
@@ -630,6 +641,13 @@ export const api = {
             get: () => invoke('ai:model:get'),
             save: model => invoke('ai:model:save', { model })
         },
+        /** 模型档案：管理员增删 / 设为全局默认；用户切换本人使用的档案 */
+        profiles: {
+            save: payload => invoke('ai:profiles:save', payload),
+            remove: id => invoke('ai:profiles:delete', { id }),
+            activate: id => invoke('ai:profiles:activate', { id })
+        },
+        profileUse: id => invoke('ai:profile:use', { id }),
         /** Agent 能力：配置与工具清单读取 / 管理员保存 / 用户自助开关 */
         agent: {
             get: () => invoke('ai:agent:get'),
