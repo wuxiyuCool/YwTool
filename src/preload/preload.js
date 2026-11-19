@@ -99,7 +99,11 @@ const validChannels = [
     'ai:profiles:save', 'ai:profiles:delete', 'ai:profiles:activate', 'ai:profile:use',
     'ai:agent:get', 'ai:agent:save', 'ai:agent:toggle', 'ai:agent:tools',
     'ai:approval:reply',
-    'ai:roles:list', 'ai:roles:save', 'ai:roles:delete', 'ai:role:save'
+    'ai:roles:list', 'ai:roles:save', 'ai:roles:delete', 'ai:role:save',
+    'ai:collectors:list', 'ai:collectors:save', 'ai:collectors:delete', 'ai:collectors:run',
+    'ai:triggers:list', 'ai:tickets:list', 'ai:contract:validate',
+    'ai:router:state', 'ai:tickets:get', 'ai:tickets:create', 'ai:tickets:accept', 'ai:tickets:stop', 'ai:tickets:retry',
+    'ai:triggers:accept', 'ai:attention:list', 'ai:attention:answer', 'ai:writeback:get', 'ai:writeback:save'
 ];
 
 contextBridge.exposeInMainWorld('electron', {
@@ -112,7 +116,7 @@ contextBridge.exposeInMainWorld('electron', {
 
     /** 主进程主动推送（任务执行进度、告警、菜单导航、AI 流式回复） */
     on: (channel, callback) => {
-        const pushChannels = ['task:progress', 'alert:new', 'schedule:progress', 'menu:navigate', 'ai:stream', 'ai:step', 'data:progress', 'netsec:packet', 'netsec:breakpoint', 'terminal:data', 'terminal:exit', 'ai:approval', 'pcap:live'];
+        const pushChannels = ['task:progress', 'alert:new', 'schedule:progress', 'menu:navigate', 'ai:stream', 'ai:step', 'data:progress', 'netsec:packet', 'netsec:breakpoint', 'terminal:data', 'terminal:exit', 'ai:approval', 'pcap:live', 'agent:updated'];
         if (!pushChannels.includes(channel)) return () => {};
         const listener = (event, payload) => callback(payload);
         ipcRenderer.on(channel, listener);

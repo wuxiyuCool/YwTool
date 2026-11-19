@@ -62,6 +62,18 @@ async function tick() {
             if (schedule.nextRunAt > now) continue;
             await execute(schedule, 'schedule');
         }
+        // D 线收集器复用同一 30s 心跳（自动发现）
+        try {
+            await require('./agentCollect').tickDue();
+        } catch (err) {
+            audit.write({ type: '告警', user: 'system', detail: '收集器心跳异常：' + err.message, result: 'failed' });
+        }
+        // D 线路由心跳：接单研判 / 派工 / 巡检 / 重启恢复（P7）
+        try {
+            await require('./agentRouter').tick();
+        } catch (err) {
+            audit.write({ type: '告警', user: 'system', detail: 'AI 路由心跳异常：' + err.message, result: 'failed' });
+        }
     } catch (err) {
         audit.write({ type: '告警', user: 'system', detail: '调度器异常：' + err.message, result: 'failed' });
     } finally {

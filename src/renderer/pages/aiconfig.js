@@ -24,8 +24,7 @@ const AGENT_TOGGLES = [
     { key: 'allowSaveScript', title: 'save_script · 保存为脚本', desc: '把 AI 产出的 Shell / Python 脚本落库到「脚本管理」，同名自动升版本', danger: false },
     { key: 'allowLocalExec', title: 'run_local_command · 执行本机命令', desc: '在平台所在机器执行命令，仍需通过敏感词黑白名单校验并留痕；仅在受控环境开启', danger: true },
     { key: 'allowRemoteExec', title: 'run_host_command / run_batch_command / terminal_run · 远程执行', desc: '在纳管主机（SSH）执行单条或批量命令、在已打开的终端会话中执行命令，同样过黑白名单并审计；开启前建议先白名单演练', danger: true },
-    { key: 'allowSqlExecute', title: 'execute_sql / describe_table · 查询数据源', desc: '在已配置数据源上执行只读 SQL 与查看表结构（SELECT / SHOW / DESC / EXPLAIN）', danger: true },
-    { key: 'execApproval', title: '高危执行需审批', desc: '开启后远程命令 / 批量执行 / 终端会话执行等高危工具每次执行前弹窗请求确认（120 秒未处理自动拒绝）；关闭则无需确认直接执行', danger: false }
+    { key: 'allowSqlExecute', title: 'execute_sql / describe_table · 查询数据源', desc: '在已配置数据源上执行只读 SQL 与查看表结构（SELECT / SHOW / DESC / EXPLAIN）', danger: true }
 ];
 
 export function render() {
@@ -74,6 +73,55 @@ export function render() {
                     <input class="input" id="ai-key" type="password" placeholder="sk-..." autocomplete="off">
                 </div>
             </div>
+            <div style="margin-top:10px">
+                <button type="button" class="btn-link" id="ai-adv-toggle" style="font-size:12.5px">高级参数（可选）▸</button>
+                <div id="ai-adv" style="display:none;margin-top:8px;padding:10px 12px;border:1px solid var(--border);border-radius:8px">
+                    <div class="form-item">
+                        <label>上下文上限（tokens，留空=不限制；设置后超限会在发送前自动压缩，绝不超限发送）</label>
+                        <input class="input" id="ai-ctxlimit" type="number" min="1024" step="1024" placeholder="不限制，如 65536 / 131072">
+                    </div>
+                    <div class="form-row">
+                        <div class="form-item">
+                            <label>temperature（0~2，留空=跟随模型默认）</label>
+                            <input class="input" id="ai-temp" type="number" min="0" max="2" step="0.1" placeholder="默认">
+                        </div>
+                        <div class="form-item">
+                            <label>top_p（0~1，留空=跟随模型默认）</label>
+                            <input class="input" id="ai-topp" type="number" min="0" max="1" step="0.01" placeholder="默认">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-item">
+                            <label>思考模式</label>
+                            <select class="select" id="ai-thinking">
+                                <option value="default">跟随模型默认（不发送参数）</option>
+                                <option value="on">开启思考</option>
+                                <option value="off">关闭思考</option>
+                            </select>
+                        </div>
+                        <div class="form-item" id="ai-effort-row">
+                            <label>思考等级</label>
+                            <select class="select" id="ai-effort">
+                                <option value="low">低（low）</option>
+                                <option value="medium">中（medium）</option>
+                                <option value="high">高（high）</option>
+                                <option value="max">最高（max）</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="form-row" id="ai-dialect-row">
+                        <div class="form-item">
+                            <label>参数方言（思考参数的协议写法，按接入服务手动选择）</label>
+                            <select class="select" id="ai-dialect">
+                                <option value="standard">标准 OpenAI（reasoning_effort）</option>
+                                <option value="deepseek">DeepSeek（thinking 对象 + reasoning_effort）</option>
+                                <option value="qwen">Qwen 本地模板（chat_template_kwargs）</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="form-hint" id="ai-adv-hint"></div>
+                </div>
+            </div>
             <div class="toolbar" style="margin-top:10px">
                 <span class="muted" id="ai-config-status" style="font-size:12px;margin-right:auto"></span>
                 <button class="btn btn-ghost" id="ai-test" data-write>测试连接</button>
@@ -110,6 +158,45 @@ export function render() {
                     <div class="form-item">
                         <label>数据行上限</label>
                         <input class="input" id="ag-rows" type="number" min="10" max="2000" value="200">
+                    </div>
+                </div>
+                <div class="form-item">
+                    <label>高危执行模式（远程命令 / 批量执行 / 终端会话执行 / 本机命令）</label>
+                    <select class="select" id="ag-execmode">
+                        <option value="approve">审批：每次执行前弹窗确认（120 秒未处理自动拒绝）</option>
+                        <option value="observe">演练：只记录「本来会执行什么」，不真实下发（黑白名单照常校验）</option>
+                        <option value="auto">免审：直接执行（仅建议在受控环境使用）</option>
+                    </select>
+                </div>
+                <div class="form-item" style="margin-top:10px">
+                    <label>路由模式（自动发现 → 研判 → 派工，详见「Agent 工作台」）</label>
+                    <select class="select" id="ag-routermode">
+                        <option value="observe">演练：只做接单研判并记录，不真实派工</option>
+                        <option value="active">启用：研判通过后自动派工给 work 节点执行</option>
+                    </select>
+                </div>
+                <div class="form-row" style="margin-bottom:2px">
+                    <div class="form-item">
+                        <label>研判档案（路由节点）</label>
+                        <select class="select" id="ag-routerprofile"></select>
+                    </div>
+                    <div class="form-item">
+                        <label>执行档案（work 节点默认）</label>
+                        <select class="select" id="ag-workerprofile"></select>
+                    </div>
+                </div>
+                <div class="form-row" style="margin-bottom:2px">
+                    <div class="form-item">
+                        <label>并发工作槽</label>
+                        <input class="input" id="ag-slots" type="number" min="1" max="4" value="2">
+                    </div>
+                    <div class="form-item">
+                        <label>单工单最大轮次</label>
+                        <input class="input" id="ag-tkrounds" type="number" min="1" max="100" value="20">
+                    </div>
+                    <div class="form-item">
+                        <label>单工单时限（分钟）</label>
+                        <input class="input" id="ag-tkminutes" type="number" min="1" max="240" value="30">
                     </div>
                 </div>
                 <div class="ag-toggle-grid" style="grid-template-columns:1fr">
@@ -209,11 +296,12 @@ export async function mount(root) {
         });
         const meta = PROTOCOL_META[protocol] || PROTOCOL_META.openai;
         const dsHint = /deepseek\.com/i.test(String($('#ai-baseurl').value || ''))
-            ? '<span>· DeepSeek 官方模型名仅 deepseek-chat / deepseek-reasoner</span>' : '';
+            ? '<span>· DeepSeek 模型名：deepseek-chat / deepseek-reasoner / deepseek-flash（2026-11-19 实测均可用，以网关实际为准）</span>' : '';
         protocolHint.innerHTML = `请求端点 <code>${esc(meta.endpoint)}</code><span>· ${esc(meta.auth)}</span>${dsHint}`;
         $('#ai-baseurl').placeholder = meta.placeholder;
         $('#ai-model').placeholder = meta.modelEg;
         paintBadge();
+        paintAdv();
     }
 
     function paintBadge() {
@@ -256,9 +344,48 @@ export async function mount(root) {
         $('#ai-model').value = p ? p.model : '';
         $('#ai-key').value = '';
         $('#ai-key').placeholder = hasKey ? '已保存（留空保持不变）' : 'sk-...（本地服务可随意填）';
+        fillAdv(p || {});
         paintProtocol();
         paintProfileBar();
     }
+
+    /* ---------------- 高级参数（采样/思考，全部可选） ---------------- */
+
+    function fillAdv(src) {
+        $('#ai-ctxlimit').value = src.contextLimit !== undefined && src.contextLimit !== null ? src.contextLimit : '';
+        $('#ai-temp').value = src.temperature !== undefined && src.temperature !== null ? src.temperature : '';
+        $('#ai-topp').value = src.topP !== undefined && src.topP !== null ? src.topP : '';
+        $('#ai-thinking').value = ['default', 'on', 'off'].includes(src.thinking) ? src.thinking : 'default';
+        $('#ai-effort').value = ['low', 'medium', 'high', 'max'].includes(src.thinkingEffort) ? src.thinkingEffort : 'high';
+        $('#ai-dialect').value = ['standard', 'deepseek', 'qwen'].includes(src.paramDialect) ? src.paramDialect : 'standard';
+        paintAdv();
+    }
+
+    function paintAdv() {
+        const thinking = $('#ai-thinking').value;
+        const on = thinking === 'on';
+        $('#ai-effort-row').style.display = on ? '' : 'none';
+        $('#ai-dialect-row').style.display = protocol === 'openai' ? '' : 'none';
+        // D2 护栏：思考开启时采样参数不发送（Anthropic 会 400、DeepSeek 不生效）
+        $('#ai-temp').disabled = on;
+        $('#ai-topp').disabled = on;
+        const hints = [];
+        if (on) hints.push('思考模式下 temperature / top_p 不发送（各家服务端不生效或直接拒绝）');
+        if (protocol === 'anthropic') hints.push('Anthropic 协议：思考等级映射为 budget_tokens，输出上限自动随之抬高');
+        else if ($('#ai-dialect').value === 'deepseek') hints.push('DeepSeek 方言：等级无 medium，中档自动归一为 high');
+        else if ($('#ai-dialect').value === 'qwen') hints.push('Qwen 本地模板方言：仅开/关，无等级概念');
+        hints.push('本地模型对参数「接受不报错」但生效与否不保证（P0 实测）');
+        $('#ai-adv-hint').textContent = hints.join(' · ');
+    }
+
+    $('#ai-adv-toggle').addEventListener('click', () => {
+        const box = $('#ai-adv');
+        const open = box.style.display === 'none';
+        box.style.display = open ? '' : 'none';
+        $('#ai-adv-toggle').textContent = open ? '高级参数（可选）▾' : '高级参数（可选）▸';
+    });
+    $('#ai-thinking').addEventListener('change', paintAdv);
+    $('#ai-dialect').addEventListener('change', paintAdv);
 
     function paintConfigStatus() {
         const label = (PROTOCOL_META[protocol] || {}).label || protocol;
@@ -281,6 +408,18 @@ export async function mount(root) {
         $('#ag-steps').value = agentCfg.maxSteps;
         $('#ag-timeout').value = agentCfg.commandTimeout;
         $('#ag-rows').value = agentCfg.maxRows;
+        $('#ag-execmode').value = ['approve', 'observe', 'auto'].includes(agentCfg.execMode) ? agentCfg.execMode : 'approve';
+        $('#ag-routermode').value = agentCfg.routerMode === 'active' ? 'active' : 'observe';
+        $('#ag-slots').value = agentCfg.workerSlots ?? 2;
+        $('#ag-tkrounds').value = agentCfg.ticketMaxRounds ?? 20;
+        $('#ag-tkminutes').value = agentCfg.ticketMaxMinutes ?? 30;
+        const profileOpts = sel => {
+            const cur = agentCfg[sel === '#ag-routerprofile' ? 'routerProfileId' : 'workerProfileId'] || '';
+            $(sel).innerHTML = `<option value="">跟随全局默认档案</option>` +
+                profiles.map(p => `<option value="${esc(p.id)}" ${p.id === cur ? 'selected' : ''}>${esc(p.name)}（${esc(p.model)}）</option>`).join('');
+        };
+        profileOpts('#ag-routerprofile');
+        profileOpts('#ag-workerprofile');
         AGENT_TOGGLES.forEach(t => {
             const el = $(`#ag-${t.key}`);
             if (el) el.checked = !!agentCfg[t.key];
@@ -320,7 +459,14 @@ export async function mount(root) {
             enabled: $('#ag-enabled').checked,
             maxSteps: num('#ag-steps', 6),
             commandTimeout: num('#ag-timeout', 15),
-            maxRows: num('#ag-rows', 200)
+            maxRows: num('#ag-rows', 200),
+            execMode: $('#ag-execmode').value,
+            routerMode: $('#ag-routermode').value,
+            routerProfileId: $('#ag-routerprofile').value,
+            workerProfileId: $('#ag-workerprofile').value,
+            workerSlots: num('#ag-slots', 2),
+            ticketMaxRounds: num('#ag-tkrounds', 20),
+            ticketMaxMinutes: num('#ag-tkminutes', 30)
         };
         AGENT_TOGGLES.forEach(t => { payload[t.key] = $(`#ag-${t.key}`).checked; });
         return payload;
@@ -346,9 +492,11 @@ export async function mount(root) {
                 $('#ai-baseurl').value = cfg.baseURL || '';
                 $('#ai-model').value = cfg.model || '';
                 $('#ai-key').placeholder = hasKey ? '已保存（留空保持不变）' : 'sk-...（本地服务可随意填）';
+                fillAdv(cfg);
                 paintProtocol();
             }
             paintConfigStatus();
+            if (agentCfg) paintAgent();
         } catch (err) {
             statusEl.textContent = '配置读取失败：' + err.message;
         }
@@ -447,7 +595,13 @@ export async function mount(root) {
                 protocol,
                 baseURL: $('#ai-baseurl').value.trim(),
                 model: $('#ai-model').value.trim(),
-                apiKey: $('#ai-key').value
+                apiKey: $('#ai-key').value,
+                contextLimit: $('#ai-ctxlimit').value,
+                temperature: $('#ai-temp').value,
+                topP: $('#ai-topp').value,
+                thinking: $('#ai-thinking').value,
+                thinkingEffort: $('#ai-effort').value,
+                paramDialect: $('#ai-dialect').value
             });
             if (res && res.ok) {
                 toast('模型档案已保存', 'success');

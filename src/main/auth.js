@@ -51,6 +51,10 @@ const ADMIN_ONLY = new Set([
     'ai:profiles:save', 'ai:profiles:delete', 'ai:profiles:activate',
     // 提示词角色定义属平台级配置（会话/权限不受影响），仅管理员维护
     'ai:roles:save', 'ai:roles:delete',
+    // D 线收集器管理属平台级配置（拉取外部故障/工单入口），仅管理员
+    'ai:collectors:save', 'ai:collectors:delete', 'ai:collectors:run',
+    // D 线 ITSM 回写配置含外部系统凭据，仅管理员
+    'ai:writeback:save',
     // 数据集成（ETL）：批量写库与数据外流均属高危，仅管理员
     'db:etl:run', 'db:etl:tasks:save', 'db:etl:tasks:delete',
     // 网络安全工作台：外发请求 / 代理 / 断点改包均属高危操作，仅管理员

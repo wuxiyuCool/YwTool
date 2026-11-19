@@ -34,6 +34,7 @@ import * as ledger from './pages/ledger.js';
 import * as system from './pages/system.js';
 import * as users from './pages/users.js';
 import * as aiconfig from './pages/aiconfig.js';
+import * as agentBoard from './pages/agentBoard.js';
 import * as aiPanel from './aiPanel.js';
 import { api } from './api.js';
 import { toast } from './ui.js';
@@ -91,6 +92,7 @@ const pages = {
     sensitive: { label: '敏感词配置', sub: '命令拦截规则 · 正则黑名单 · 白名单机制', domain: 'system', icon: icons.shield, module: 'rules', mod: sensitive },
     audit: { label: '日志审计', sub: '操作与命令全量留痕 · 异常告警', domain: 'system', icon: icons.scroll, module: 'audit', mod: audit },
     aiconfig: { label: 'AI 配置', sub: '模型提供方 · 模型清单 · Agent 能力开关', domain: 'system', icon: icons.spark, module: 'ai', mod: aiconfig },
+    agentBoard: { label: 'Agent 工作台', sub: '自动发现 · 派工执行 · 人工待办 · 工单回写', domain: 'system', icon: icons.activity, module: 'ai', mod: agentBoard },
     users: { label: '用户与权限', sub: '账号角色 · 模块权限矩阵 · 用户覆写', domain: 'system', icon: icons.users, module: 'users', mod: users },
     system: { label: '系统设置', sub: '运行参数 · 环境 · 依赖状态', domain: 'system', icon: icons.gear, module: 'settings', mod: system }
 };

@@ -20,6 +20,7 @@ const audit = require('../auditLogger');
 const auth = require('../auth');
 const ai = require('../ai');
 const agentTools = require('../agentTools');
+const agentCollect = require('../agentCollect');
 
 const HISTORY_LIMIT = 40;
 
@@ -288,6 +289,96 @@ function setup(ipcMain) {
         return { ok: true, role: id };
     });
 
+    /* ---------------- D 线：收集器 / 触发记录 / 派工账本 / 契约自检 ---------------- */
+
+    ipcMain.handle('ai:collectors:list', () => ({ ok: true, collectors: agentCollect.listCollectors() }));
+
+    ipcMain.handle('ai:collectors:save', (e, payload = {}) => {
+        const result = agentCollect.saveCollector(payload);
+        if (result.ok) log(`${payload.id ? '修改' : '新增'} AI 收集器「${result.collector.name}」（${result.collector.mode}）`);
+        return result;
+    });
+
+    ipcMain.handle('ai:collectors:delete', (e, { id } = {}) => {
+        const col = agentCollect.listCollectors().find(c => c.id === id);
+        const result = agentCollect.deleteCollector(id);
+        if (result.ok) log(`删除 AI 收集器「${(col || {}).name || id}」`);
+        return result;
+    });
+
+    ipcMain.handle('ai:collectors:run', async (e, { id } = {}) => {
+        const result = await agentCollect.runCollector(id, 'manual');
+        log(`手动触发 AI 收集器：${result.status || result.message}`, result.ok ? 'success' : 'failed');
+        return result;
+    });
+
+    ipcMain.handle('ai:triggers:list', (e, { status } = {}) => ({ ok: true, triggers: agentCollect.listTriggers(status) }));
+
+    ipcMain.handle('ai:tickets:list', (e, { stage } = {}) => ({ ok: true, tickets: require('../agentRouter').listTickets(stage) }));
+
+    /** 契约自检框：与收集器共用同一校验器（附录 A），AI 生成的爬虫交付前先贴输出自检 */
+    ipcMain.handle('ai:contract:validate', (e, { stdout } = {}) => {
+        const result = agentCollect.validateContract(String(stdout || ''));
+        return { ok: true, valid: result.ok && result.errors.length === 0, ...result };
+    });
+
+    /* ---------------- D 线 P7：路由派工 / 工单操作 / attention / ITSM 回写 ---------------- */
+
+    const agentRouter = require('../agentRouter');
+
+    ipcMain.handle('ai:router:state', () => agentRouter.state());
+
+    ipcMain.handle('ai:tickets:get', (e, { id } = {}) => {
+        const ticket = agentRouter.getTicket(String(id || ''));
+        return ticket ? { ok: true, ticket } : { ok: false, message: '工单不存在' };
+    });
+
+    ipcMain.handle('ai:tickets:create', (e, payload = {}) => {
+        const result = agentRouter.manualTicket(payload);
+        if (result.ok) log(`人工创建 AI 工单「${result.ticket.title}」`);
+        return result;
+    });
+
+    ipcMain.handle('ai:tickets:accept', async (e, { id } = {}) => {
+        const result = await agentRouter.acceptTicket(String(id || ''), operator());
+        log(`验收 AI 工单 ${id}${result.writeback ? '（回写：' + result.writeback.status + '）' : ''}`, result.ok ? 'success' : 'failed');
+        return result;
+    });
+
+    ipcMain.handle('ai:tickets:stop', (e, { id } = {}) => {
+        const result = agentRouter.stopTicket(String(id || ''), operator());
+        if (result.ok) log(`停止 AI 工单 ${id}`);
+        return result;
+    });
+
+    ipcMain.handle('ai:tickets:retry', (e, { id } = {}) => {
+        const result = agentRouter.retryTicket(String(id || ''), operator());
+        if (result.ok) log(`重试 AI 工单 ${id}`);
+        return result;
+    });
+
+    ipcMain.handle('ai:triggers:accept', (e, { id, profileId } = {}) => {
+        const result = agentRouter.acceptTrigger(String(id || ''), { profileId });
+        if (result.ok) log(`人工采纳 AI 候选 ${id} 建单`);
+        return result;
+    });
+
+    ipcMain.handle('ai:attention:list', (e, { status } = {}) => ({ ok: true, attention: agentRouter.listAttention(status) }));
+
+    ipcMain.handle('ai:attention:answer', (e, { id, text, approved } = {}) => {
+        const result = agentRouter.answerAttention(String(id || ''), { text, approved }, operator());
+        if (result.ok) log(`答复 AI 待办 ${id}`);
+        return result;
+    });
+
+    ipcMain.handle('ai:writeback:get', () => ({ ok: true, writeback: agentRouter.getWriteback() }));
+
+    ipcMain.handle('ai:writeback:save', (e, payload = {}) => {
+        const result = agentRouter.saveWriteback(payload);
+        if (result.ok) log(`更新 AI 工单回写配置（${result.writeback.enabled ? '启用' : '停用'} · ${result.writeback.baseUrl || '-'}）`);
+        return result;
+    });
+
     /* ---------------- 对话 ---------------- */
 
     /**
@@ -307,9 +398,11 @@ function setup(ipcMain) {
         const controller = new AbortController();
         activeChats.set(user, controller);
         const onRetry = msg => {
-            log(`AI 请求瞬时故障，自动重试一次：${msg}`);
+            log(`AI 请求瞬时故障，自动重试：${msg}`);
             send({ channel: 'ai:stream', delta: '', retry: true });
         };
+        const onReasoning = r => send({ channel: 'ai:stream', reasoning: r });
+        const onCompressed = info => send({ channel: 'ai:stream', compressed: info });
         try {
             // Agent 最终以服务端解析为准：即使前端被篡改也拿不到未授权的 Agent 能力
             const state = ai.agentState(user);
@@ -319,6 +412,7 @@ function setup(ipcMain) {
             const cleanScope = useAgent ? sanitizeScope(scope) : null;
 
             let text;
+            let report = null;
             if (useAgent) {
                 const out = await ai.chatAgent(list, {
                     model: ai.resolveModel(user),
@@ -328,12 +422,16 @@ function setup(ipcMain) {
                     scope: cleanScope,
                     signal: controller.signal,
                     onRetry,
-                    // 审批回路：高危执行前推 ai:approval，等待渲染层 ai:approval:reply（120s 超时视为拒绝）
-                    approve: state.global.execApproval === false ? null : info => requestApproval(sender, info),
+                    // 审批回路：approve 模式高危执行前推 ai:approval（120s 超时视为拒绝）；
+                    // observe 模式工具层直接 dryRun 不走审批；auto 免审
+                    approve: state.global.execMode === 'auto' ? null : info => requestApproval(sender, info),
                     onDelta: delta => send({ channel: 'ai:stream', delta }),
+                    onReasoning,
+                    onCompressed,
                     onStep: step => send({ channel: 'ai:step', ...step })
                 });
                 text = out.text;
+                report = out.report || null;
             } else {
                 text = await ai.chatStream(list, {
                     model: ai.resolveModel(user),
@@ -341,6 +439,8 @@ function setup(ipcMain) {
                     system,
                     signal: controller.signal,
                     onRetry,
+                    onReasoning,
+                    onCompressed,
                     onDelta: delta => send({ channel: 'ai:stream', delta })
                 });
             }
@@ -350,7 +450,7 @@ function setup(ipcMain) {
                 { role: 'assistant', content: text, at: store.nowText() }
             ]);
             log(`AI ${useAgent ? 'Agent ' : ''}对话（${Math.round((Date.now() - started) / 1000)}s · ${Math.round(text.length / 100) * 100} 字符）`);
-            return { ok: true, text, agent: useAgent, durationMs: Date.now() - started };
+            return { ok: true, text, agent: useAgent, report, durationMs: Date.now() - started };
         } catch (err) {
             if (controller.signal.aborted || err.aborted) {
                 log('AI 对话被用户中止');

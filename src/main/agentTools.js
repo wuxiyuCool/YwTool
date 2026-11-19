@@ -269,6 +269,7 @@ const TOOLS = {
         desc: '在运行本平台的这台机器上执行一条 Shell 命令并返回输出；受敏感词规则与安全开关约束',
         risk: '高危',
         gate: 'allowLocalExec',
+        needsApproval: true,
         schema: {
             type: 'object',
             properties: {
@@ -707,6 +708,90 @@ const TOOLS = {
                 return { ok: false, error: err.message };
             }
         }
+    },
+
+    /** B2 结构化收尾报告（dsh Report 语义）：面板按状态徽章区分「完成/等人/失败」，不靠自由文本猜 */
+    agent_report: {
+        name: 'agent_report',
+        label: '任务收尾报告',
+        desc: '报告结构化状态：progress=阶段进展播报（不结束任务，可继续干活）；ready=完成且结果可用；blocked=需要人决策或提供信息才能继续（必须给 question）；failed=尝试过但无法完成；dropped=检查后确认无需动作。除 progress 外调用即结束当前任务回合',
+        risk: '只读',
+        gate: null,
+        schema: {
+            type: 'object',
+            properties: {
+                status: { type: 'string', enum: ['progress', 'ready', 'blocked', 'failed', 'dropped'], description: 'progress=进展播报；其余为回合终态' },
+                summary: { type: 'string', description: '一句话结论（完成了什么/缺什么/为何无需动作）' },
+                evidence: { type: 'string', description: '关键证据：调用了哪些工具、关键输出' },
+                question: { type: 'string', description: 'blocked 时必填：需要人回答的一个具体问题' }
+            },
+            required: ['status', 'summary']
+        },
+        async run(args = {}) {
+            const status = ['progress', 'ready', 'blocked', 'failed', 'dropped'].includes(args.status) ? args.status : null;
+            if (!status) return { ok: false, error: 'status 必须是 progress/ready/blocked/failed/dropped 之一' };
+            const summary = String(args.summary || '').trim();
+            if (!summary) return { ok: false, error: 'summary 不能为空' };
+            const question = String(args.question || '').trim();
+            if (status === 'blocked' && !question) return { ok: false, error: 'blocked 必须提供 question（一次只问一个具体问题）' };
+            return {
+                ok: true,
+                report: { status, summary, evidence: String(args.evidence || '').trim() || undefined, question: question || undefined }
+            };
+        }
+    },
+
+    /** C6 压缩上下文检索（billion-context 模型驱动形态）：在摘要与原文中关键词检索 */
+    search_context: {
+        name: 'search_context',
+        label: '检索压缩上下文',
+        desc: '关键词检索已被压缩的历史摘要与原文，返回匹配摘录和块 key（key 供 decompress 恢复原文）',
+        risk: '只读',
+        gate: null,
+        schema: {
+            type: 'object',
+            properties: {
+                query: { type: 'string', description: '检索关键词' }
+            },
+            required: ['query']
+        },
+        async run(args = {}) {
+            const q = String(args.query || '').trim().toLowerCase();
+            if (!q) return { ok: false, error: 'query 不能为空' };
+            const list = store.get('aiCtxSummaries') || [];
+            const hits = [];
+            for (const e of list) {
+                const hay = String(e.summary || '') + '\n' + String(e.original || '');
+                const idx = hay.toLowerCase().indexOf(q);
+                if (idx >= 0) hits.push({ key: e.key, excerpt: hay.slice(Math.max(0, idx - 80), idx + 200) });
+            }
+            return { ok: true, count: hits.length, hits: hits.slice(0, 8) };
+        }
+    },
+
+    /** C6 按块恢复被压缩的原文（临时注入本轮上下文，不永久展开） */
+    decompress: {
+        name: 'decompress',
+        label: '恢复压缩原文',
+        desc: '按 search_context 返回的块 key 恢复被压缩历史的原文（只注入当前对话，不改变压缩状态）',
+        risk: '只读',
+        gate: null,
+        schema: {
+            type: 'object',
+            properties: {
+                key: { type: 'string', description: 'search_context 返回的块 key' }
+            },
+            required: ['key']
+        },
+        async run(args = {}) {
+            const e = (store.get('aiCtxSummaries') || []).find(x => x.key === String(args.key || ''));
+            if (!e) return { ok: false, error: '块不存在或已过期（缓存上限 200 条 LRU）' };
+            const original = String(e.original || '');
+            return {
+                ok: true, key: e.key,
+                original: original.length > 6000 ? original.slice(0, 6000) + `\n…（原文过长，已截断，共 ${original.length} 字符）` : (original || '（该块未保存原文）')
+            };
+        }
     }
 };
 
@@ -755,8 +840,27 @@ async function runTool(name, args = {}, ctx = {}) {
         if (scopeErr) return { ok: false, error: scopeErr };
     }
 
-    // 执行审批：开关开启时，高危执行前请求用户确认（拒绝/超时不执行）
-    if (tool.needsApproval && ctx.agent && ctx.agent.execApproval !== false && typeof ctx.approve === 'function') {
+    // 执行模式三态（B3/D4）：approve=弹窗审批 · observe=演练不实执 · auto=免审
+    const execMode = ['approve', 'observe', 'auto'].includes((ctx.agent || {}).execMode)
+        ? ctx.agent.execMode
+        : ((ctx.agent || {}).execApproval === false ? 'auto' : 'approve');
+
+    // 演练模式：高危执行不下发，只记录「本来会执行什么」；黑白名单照常校验（演练也要暴露违规）
+    if (tool.needsApproval && execMode === 'observe') {
+        const command = String(args.command || '');
+        if (command) {
+            const check = security.validate(command, { user: ctx.user, source: 'AI Agent 演练' });
+            if (!check.ok) {
+                audit.write({ type: '拦截', user: ctx.user || '-', detail: `AI Agent 演练命令被拦截：${command}`, result: 'blocked' });
+                return { ok: false, blocked: true, error: check.reason };
+            }
+        }
+        audit.write({ type: '操作', user: ctx.user || '-', detail: `AI Agent 演练（未下发）：${tool.label} ${JSON.stringify(args).slice(0, 200)}`, result: 'success' });
+        return { ok: true, dryRun: true, wouldRun: { tool: name, label: tool.label, args } };
+    }
+
+    // 执行审批：approve 模式下高危执行前请求用户确认（拒绝/超时不执行）
+    if (tool.needsApproval && execMode === 'approve' && typeof ctx.approve === 'function') {
         const approved = await ctx.approve({ name: tool.name, label: tool.label, args });
         if (!approved) {
             audit.write({ type: '拦截', user: ctx.user || '-', result: 'blocked', detail: `用户拒绝了 AI Agent 执行「${tool.label}」` });

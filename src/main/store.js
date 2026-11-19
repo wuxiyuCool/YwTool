@@ -49,6 +49,11 @@ function seeds() {
         },
         // AI 模型档案：可保存多个大模型接入（name/protocol/baseURL/model/apiKey 密文），管理员维护、用户可切换
         aiProfiles: [],
+        // D 线：自动发现收集器 / 触发记录 / 内部派工账本 / 待人工队列（正式工单生命周期在外部 ITSM）
+        aiCollectors: [],
+        aiTriggers: [],
+        aiTickets: [],
+        aiAttention: [],
         // AI 对话历史：{ username: [{ role, content, at }] }
         aiChats: {},
         // Agent 全局能力配置（能力默认收紧，由管理员在「AI 配置」页放开）
@@ -316,6 +321,10 @@ function migrate() {
     }
     if (db.aiConfig.profileId === undefined) { db.aiConfig.profileId = ''; changed = true; }
     if (!db.aiChats || typeof db.aiChats !== 'object' || Array.isArray(db.aiChats)) { db.aiChats = {}; changed = true; }
+    // D 线集合（老库补空数组）
+    ['aiCollectors', 'aiTriggers', 'aiTickets', 'aiAttention'].forEach(key => {
+        if (!Array.isArray(db[key])) { db[key] = []; changed = true; }
+    });
     // Agent 配置 / 用户级 AI 偏好（老库补默认值，缺失字段由 ai.getAgentConfig 兜底）
     if (!db.aiAgent || typeof db.aiAgent !== 'object' || Array.isArray(db.aiAgent)) { db.aiAgent = defaults.aiAgent; changed = true; }
     if (!db.aiUserPrefs || typeof db.aiUserPrefs !== 'object' || Array.isArray(db.aiUserPrefs)) { db.aiUserPrefs = {}; changed = true; }
@@ -406,7 +415,8 @@ function upsert(coll, item) {
     const prefix = {
         hosts: 'h_', scripts: 's_', rules: 'r_', accounts: 'a_', users: 'u_',
         dbSources: 'd_', tasks: 'T-', etlTasks: 'et_', etlRuns: 'er_', sqlScripts: 'sq_',
-        dockerHosts: 'dh_', aiRoles: 'ar_', aiProfiles: 'ap_', kubeClusters: 'kc_'
+        dockerHosts: 'dh_', aiRoles: 'ar_', aiProfiles: 'ap_', kubeClusters: 'kc_',
+        aiCollectors: 'ac_', aiTriggers: 'tg_', aiTickets: 'tk_', aiAttention: 'at_'
     }[coll] || 'x_';
     if (item.id) {
         const idx = arr.findIndex(x => x.id === item.id);

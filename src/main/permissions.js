@@ -50,7 +50,7 @@ const MODULES = [
     { id: 'alerts', domain: 'system', label: '告警中心', desc: '顶栏告警铃铛与确认', pages: [], caps: ['viewer', 'operator', 'admin'] },
     { id: 'users', domain: 'system', label: '用户与权限', desc: '账号、角色与模块权限矩阵', pages: ['users'], caps: ['viewer', 'admin'] },
     { id: 'settings', domain: 'system', label: '系统设置', desc: '运行参数与依赖状态', pages: ['system'], caps: ['viewer', 'admin'] },
-    { id: 'ai', domain: 'system', label: 'AI 助手', desc: 'AI 对话 · 脚本生成与优化', pages: ['aiconfig'], caps: ['viewer', 'operator', 'admin'] }
+    { id: 'ai', domain: 'system', label: 'AI 助手', desc: 'AI 对话 · 脚本生成与优化 · Agent 工作台', pages: ['aiconfig', 'agentBoard'], caps: ['viewer', 'operator', 'admin'] }
 ];
 
 /**

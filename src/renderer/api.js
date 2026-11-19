@@ -158,6 +158,27 @@ function demoFallback(channel, data) {
         }
         case 'ai:test': return { ok: true, durationMs: 120, message: `连接成功 · DeepSeek · ${(data && data.model) || 'deepseek-chat'}（演示）` };
         case 'ai:approval:reply': return { ok: true };
+        case 'ai:collectors:list': return { ok: true, collectors: demo.demoAgentCollectors() };
+        case 'ai:collectors:save': return { ok: true, collector: { id: 'ac_demo', name: (data && data.name) || '演示收集器' }, collectors: demo.demoAgentCollectors() };
+        case 'ai:collectors:delete': return { ok: true, collectors: demo.demoAgentCollectors() };
+        case 'ai:collectors:run': return { ok: true, status: 'success', added: 0, skipped: 0 };
+        case 'ai:triggers:list': return { ok: true, triggers: demo.demoAgentTriggers };
+        case 'ai:tickets:list': return { ok: true, tickets: demo.demoAgentTickets };
+        case 'ai:tickets:get': {
+            const t = demo.demoAgentTickets.find(x => x.id === (data && data.id));
+            return t ? { ok: true, ticket: t } : { ok: false, message: '演示模式无该工单' };
+        }
+        case 'ai:tickets:create': return { ok: true, ticket: { id: 'tk_demo', title: (data && data.title) || '演示工单', stage: 'working/queued', status: 'open' } };
+        case 'ai:tickets:accept': return { ok: true, writeback: { status: 'none' } };
+        case 'ai:tickets:stop': return { ok: true };
+        case 'ai:tickets:retry': return { ok: true };
+        case 'ai:triggers:accept': return { ok: true, ticket: { id: 'tk_demo', stage: 'working/queued' } };
+        case 'ai:router:state': return demo.demoRouterState();
+        case 'ai:attention:list': return { ok: true, attention: demo.demoAgentAttention };
+        case 'ai:attention:answer': return { ok: true };
+        case 'ai:writeback:get': return { ok: true, writeback: { enabled: false, baseUrl: '', username: '', tenantId: '', ticketType: 1, systemId: '', hasPassword: false } };
+        case 'ai:writeback:save': return { ok: true, writeback: { enabled: false } };
+        case 'ai:contract:validate': return { ok: true, valid: false, items: [], errors: [{ path: 'frame', reason: '演示模式不执行校验' }], raw: '' };
         case 'db:etl:preview':
             return {
                 ok: true, kind: 'db', total: 120,
@@ -662,6 +683,35 @@ export const api = {
             remove: id => invoke('ai:roles:delete', id),
             select: roleId => invoke('ai:role:save', { roleId })
         },
+        /** D 线：自动发现收集器 / 触发记录 / 派工账本 / 契约自检 */
+        collectors: {
+            list: () => invoke('ai:collectors:list'),
+            save: payload => invoke('ai:collectors:save', payload),
+            remove: id => invoke('ai:collectors:delete', { id }),
+            run: id => invoke('ai:collectors:run', { id })
+        },
+        triggers: {
+            list: status => invoke('ai:triggers:list', { status }),
+            accept: (id, profileId) => invoke('ai:triggers:accept', { id, profileId })
+        },
+        tickets: {
+            list: () => invoke('ai:tickets:list'),
+            get: id => invoke('ai:tickets:get', { id }),
+            create: payload => invoke('ai:tickets:create', payload),
+            accept: id => invoke('ai:tickets:accept', { id }),
+            stop: id => invoke('ai:tickets:stop', { id }),
+            retry: id => invoke('ai:tickets:retry', { id })
+        },
+        router: { state: () => invoke('ai:router:state') },
+        attention: {
+            list: status => invoke('ai:attention:list', { status }),
+            answer: (id, payload) => invoke('ai:attention:answer', { id, ...payload })
+        },
+        writeback: {
+            get: () => invoke('ai:writeback:get'),
+            save: payload => invoke('ai:writeback:save', payload)
+        },
+        contractValidate: stdout => invoke('ai:contract:validate', { stdout }),
         /** 多会话管理：列表 / 新建 / 切换 / 删除 */
         sessions: {
             list: () => invoke('ai:sessions:list'),
@@ -715,6 +765,12 @@ export const api = {
     onAiApproval: callback => {
         if (demoMode || typeof bridge.on !== 'function') return () => {};
         return bridge.on('ai:approval', callback);
+    },
+
+    /** Agent 路由/工单/待办状态变更推送（kind: attention|ticket|trigger|collector） */
+    onAgentUpdated: callback => {
+        if (demoMode || typeof bridge.on !== 'function') return () => {};
+        return bridge.on('agent:updated', callback);
     },
 
     /** ETL 同步任务进度推送（读取行数 / 写入行数 / 批次数） */

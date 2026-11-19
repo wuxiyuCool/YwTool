@@ -8,6 +8,7 @@
  */
 import { api, setUnauthorizedHandler } from './api.js';
 import { esc, toast, setPermissionProvider } from './ui.js';
+import { demoModules } from './demoData.js';
 
 let user = null;
 let onReadyCallback = null;
@@ -325,9 +326,11 @@ export async function bootstrap(onReady) {
         showLogin('会话已失效，请重新登录');
     });
 
-    // 浏览器演示模式：无 IPC 桥接，以演示身份放行
+    // 浏览器演示模式：无 IPC 桥接，以演示身份放行（全模块 admin，与 router 的演示放行一致）
     if (api.demoMode) {
-        user = { username: 'demo', role: '系统管理员', caps: { read: true, write: true, admin: true } };
+        const modules = {};
+        demoModules.forEach(m => { modules[m.id] = 'admin'; });
+        user = { username: 'demo', role: '系统管理员', caps: { read: true, write: true, admin: true }, modules };
         await afterLogin();
         return;
     }

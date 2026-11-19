@@ -50,6 +50,11 @@ let messages = [];        // 本地会话上下文 { role, content }（不含上
 let sending = false;
 let streamingEl = null;   // 当前流式气泡
 let streamingRaw = '';
+let thinkingEl = null;    // 当前思考区（DeepSeek 网页版式：直播展开→正文自动收起→可再展开）
+let thinkingRaw = '';
+let thinkingStart = 0;
+let thinkingTimer = null;
+let thinkingDone = false;
 let codeStore = {};       // 代码块全局自增 id → 文本（供复制 / 保存读取）
 let codeSeq = 0;
 let lastRenderIds = [];   // 最近一次 renderContent 生成的代码块 id
@@ -60,6 +65,7 @@ let target = null;        // { kind:'script', name, type, desc, content }
 let unsubStream = null;
 let unsubStep = null;
 let unsubApproval = null;
+let unsubAgentBoard = null;
 let agentSupported = false;  // 管理员是否开启了 Agent 总开关
 let agentEnabled = false;    // 当前用户本次是否启用 Agent
 let agentScope = { hostIds: [], dbIds: [], sessionIds: [] };  // 操作目标圈定（空数组 = 该类别不限制）
@@ -146,8 +152,13 @@ function appendMessage(role, text, { streaming = false } = {}) {
 
 function finalizeStreaming(text) {
     if (!streamingEl) return;
+    collapseThinking();
+    // 思考区保留在消息内供展开回看（不进历史库，刷新即失）
+    const thinkHtml = thinkingEl ? thinkingEl.outerHTML : '';
     streamingEl.innerHTML =
-        `<div class="ai-msg-bubble">${renderContent(text) || ' '}</div>${actionsHtml(text)}`;
+        thinkHtml + `<div class="ai-msg-bubble">${renderContent(text) || ' '}</div>${actionsHtml(text)}`;
+    const t = streamingEl.querySelector('.ai-thinking');
+    if (t) bindThinkingToggle(t);
     if (lastRenderIds.length) streamingEl.dataset.codeId = String(lastRenderIds[0]);
     finishStreaming();
     chatEl.scrollTop = chatEl.scrollHeight;
@@ -155,14 +166,86 @@ function finalizeStreaming(text) {
 
 function updateStreaming(delta) {
     if (!streamingEl) return;
+    collapseThinking(); // 首个正文 delta → 思考区自动收起为「已思考 X 秒」
     streamingRaw += delta;
     streamingEl.querySelector('.ai-msg-bubble').innerHTML = renderContent(streamingRaw) || ' ';
     chatEl.scrollTop = chatEl.scrollHeight;
 }
 
+/* ---------------- 思考过程区 ---------------- */
+
+function bindThinkingToggle(el) {
+    const btn = el.querySelector('.ai-thinking-toggle');
+    const body = el.querySelector('.ai-thinking-body');
+    if (!btn || !body) return;
+    btn.addEventListener('click', () => {
+        const hidden = body.style.display === 'none';
+        body.style.display = hidden ? '' : 'none';
+        btn.textContent = hidden ? '收起' : '展开全部';
+    });
+}
+
+const thinkingSeconds = () => Math.max(1, Math.round((Date.now() - thinkingStart) / 1000));
+
+function updateReasoning(delta) {
+    if (!streamingEl || !delta) return;
+    if (!thinkingEl) {
+        thinkingStart = Date.now();
+        thinkingEl = document.createElement('div');
+        thinkingEl.className = 'ai-thinking';
+        thinkingEl.innerHTML =
+            '<div class="ai-thinking-head"><span class="ai-thinking-title">思考中…</span>' +
+            '<span class="ai-thinking-time"></span>' +
+            '<button type="button" class="ai-thinking-toggle">收起</button></div>' +
+            '<div class="ai-thinking-body"></div>';
+        streamingEl.insertBefore(thinkingEl, streamingEl.querySelector('.ai-msg-bubble'));
+        bindThinkingToggle(thinkingEl);
+        thinkingTimer = setInterval(() => {
+            const t = thinkingEl && thinkingEl.querySelector('.ai-thinking-time');
+            if (t) t.textContent = thinkingSeconds() + 's';
+        }, 1000);
+    }
+    thinkingRaw += delta;
+    thinkingEl.querySelector('.ai-thinking-body').textContent = thinkingRaw;
+    chatEl.scrollTop = chatEl.scrollHeight;
+}
+
+function collapseThinking() {
+    if (!thinkingEl || thinkingDone) return;
+    thinkingDone = true;
+    if (thinkingTimer) { clearInterval(thinkingTimer); thinkingTimer = null; }
+    const title = thinkingEl.querySelector('.ai-thinking-title');
+    const time = thinkingEl.querySelector('.ai-thinking-time');
+    const body = thinkingEl.querySelector('.ai-thinking-body');
+    const btn = thinkingEl.querySelector('.ai-thinking-toggle');
+    if (title) title.textContent = `已思考 ${thinkingSeconds()} 秒`;
+    if (time) time.textContent = '';
+    if (body) body.style.display = 'none';
+    if (btn) btn.textContent = '展开全部';
+}
+
 function finishStreaming() {
+    collapseThinking();
+    if (thinkingTimer) { clearInterval(thinkingTimer); thinkingTimer = null; }
+    thinkingEl = null;
+    thinkingRaw = '';
+    thinkingStart = 0;
+    thinkingDone = false;
     streamingEl = null;
     streamingRaw = '';
+}
+
+/** C 线压缩可见性：宿主计量的事实提示（防模型伪造「已压缩」话术） */
+function showCompressNote(info) {
+    const text = `已压缩早期 ${info.foldedMsgs} 条消息（约省 ${info.savedTokens} tokens）`;
+    if (streamingEl) {
+        const note = document.createElement('div');
+        note.className = 'ai-compress-note';
+        note.textContent = text;
+        streamingEl.insertBefore(note, streamingEl.querySelector('.ai-msg-bubble'));
+    } else {
+        toast(text, 'info');
+    }
 }
 
 /* ---------------- Agent 执行轨迹 ----------------
@@ -189,6 +272,25 @@ function renderStep(payload) {
     // 首个 step 时清掉「暂无会话」占位，避免轨迹被空白挤到可视区外
     const emptyEl = chatEl.querySelector('.ai-empty');
     if (emptyEl) emptyEl.remove();
+
+    // B2 结构化收尾报告：四色徽章区分「完成/等人/失败/无需动作」
+    if (payload.type === 'report') {
+        const REPORT_META = {
+            ready: ['green', '就绪 · 待验收'],
+            blocked: ['amber', '受阻 · 待人工回答'],
+            failed: ['red', '失败'],
+            dropped: ['gray', '无需动作']
+        };
+        const [color, label] = REPORT_META[payload.status] || ['gray', String(payload.status || '报告')];
+        const el = document.createElement('div');
+        el.className = 'ai-step report';
+        el.innerHTML = `<span class="badge ${color}">${esc(label)}</span>
+            <span class="ai-step-args">${esc(stepSummary(payload.summary, 120))}</span>
+            ${payload.question ? `<div class="ai-report-question">${esc(payload.question)}</div>` : ''}`;
+        chatEl.appendChild(el);
+        chatEl.scrollTop = chatEl.scrollHeight;
+        return;
+    }
 
     if (payload.type === 'call') {
         const key = stepKey(payload);
@@ -985,6 +1087,8 @@ function bindEvents() {
         unsubStream = api.onAiStream(payload => {
             if (!payload) return;
             if (payload.retry) { toast('网络瞬时波动，正在自动重试…', 'warn'); return; }
+            if (payload.compressed) { showCompressNote(payload.compressed); return; }
+            if (payload.reasoning) { updateReasoning(payload.reasoning); return; }
             if (payload.delta) updateStreaming(payload.delta);
         });
     }
@@ -995,6 +1099,14 @@ function bindEvents() {
     // Agent 高危执行审批订阅
     if (typeof api.onAiApproval === 'function' && !unsubApproval) {
         unsubApproval = api.onAiApproval(payload => { if (payload) pushApproval(payload); });
+    }
+    // D 线待办提醒：不在工作台页时提示去处理（工作台页内自行提示，避免重复）
+    if (typeof api.onAgentUpdated === 'function' && !unsubAgentBoard) {
+        unsubAgentBoard = api.onAgentUpdated(payload => {
+            if (!payload || payload.kind !== 'attention') return;
+            if (context && context.pageId === 'agentBoard') return;
+            toast('Agent 工单有新的人工待办，请到「系统运维 → Agent 工作台」处理', 'warn');
+        });
     }
 
     bindResizer();

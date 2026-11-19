@@ -23,18 +23,21 @@ const VERSION = 1;
 const SCRYPT_PARAMS = { N: 16384, r: 8, p: 1 };
 
 /** 数组型配置集合（按 id 合并 / 整体替换） */
-const ARRAY_COLLECTIONS = ['hosts', 'scripts', 'rules', 'accounts', 'dbSources', 'schedules', 'sqlScripts', 'etlTasks', 'dockerHosts', 'kubeClusters'];
+const ARRAY_COLLECTIONS = ['hosts', 'scripts', 'rules', 'accounts', 'dbSources', 'schedules', 'sqlScripts', 'etlTasks', 'dockerHosts', 'kubeClusters', 'aiProfiles', 'aiCollectors'];
 /** 对象型配置集合 */
-const OBJECT_COLLECTIONS = ['aiConfig', 'aiAgent', 'modulePermissions'];
+const OBJECT_COLLECTIONS = ['aiConfig', 'aiAgent', 'aiWriteback', 'modulePermissions'];
 /** 执行历史（默认不导出，勾选后一并备份） */
-const HISTORY_COLLECTIONS = ['tasks', 'sqlHistory', 'etlRuns', 'alerts'];
+const HISTORY_COLLECTIONS = ['tasks', 'sqlHistory', 'etlRuns', 'alerts', 'aiTriggers', 'aiTickets', 'aiAttention'];
 /** 集合内的可逆加密字段：导出时解明、导入时重新加密 */
 const SECRET_FIELDS = {
     hosts: ['password'],
     accounts: ['password'],
     dbSources: ['password'],
     dockerHosts: ['token'],
-    aiConfig: ['apiKey']
+    aiConfig: ['apiKey'],
+    aiProfiles: ['apiKey'],
+    aiCollectors: ['token'],
+    aiWriteback: ['password']
 };
 
 const operator = () => (auth.getSession() || {}).username || (store.get('config') || {}).currentUser || '-';
