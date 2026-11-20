@@ -12,10 +12,12 @@ import { api } from '../api.js';
 import { esc, toast, emptyRow, loadingRow, shortTime, guardWrite, guardAdmin, canAdmin, demoBanner, applyReadonly } from '../ui.js';
 
 const STAGES = {
+    'person/confirm': { label: '待确认', badge: 'purple' },
     'person/answer': { label: '待答复', badge: 'amber' },
     'person/review': { label: '待验收', badge: 'blue' },
     'person/blocked': { label: '受阻 · 等人', badge: 'amber' },
     'person/failed': { label: '失败 · 等人', badge: 'red' },
+    'routing/brief': { label: '研判中', badge: 'purple' },
     'working/queued': { label: '排队中', badge: 'gray' },
     'working': { label: '执行中', badge: 'green' },
     'ended': { label: '已结束', badge: 'gray' }
@@ -52,6 +54,8 @@ const ATT_KIND = {
     approval: { label: '高危执行审批', badge: 'red' },
     writeback_failed: { label: '回写失败', badge: 'red' }
 };
+const DISPOSITION = { accepted: '已验收', stopped: '人工停止', dropped: '已丢弃', recorded: '已记录（演练）' };
+const SOURCE_LABEL = { manual: '人工建单', conversation: '对话接单', followup: '续派' };
 
 const badge = (map, key) => {
     const m = map[key] || { label: key || '-', badge: 'gray' };
@@ -80,8 +84,10 @@ let unsub = null;
 let refreshTimer = null;
 let knownAttention = null;   // null = 首次加载（只登记不通知）
 let detailId = null;
+let followUpId = null;
 let editingCollectorId = null;
 let rootEl = null;
+let rootClickHandler = null;   // 委托监听具名持有：#content 节点跨导航复用，重复 mount 必须先退订防累积
 
 /* ------------------------------------------------------------------
  * 渲染骨架
@@ -279,6 +285,29 @@ export function render() {
             <div class="modal-header"><h3 id="ab-detail-title">工单详情</h3><button class="modal-close" data-close>×</button></div>
             <div class="modal-body" id="ab-detail-body" style="max-height:70vh;overflow:auto"></div>
             <div class="modal-footer" id="ab-detail-footer"></div>
+        </div>
+    </div>
+
+    <div class="modal-mask" id="ab-followup-modal">
+        <div class="modal" style="max-width:700px;width:92%">
+            <div class="modal-header"><h3>续派下一轮</h3><button class="modal-close" data-close>×</button></div>
+            <div class="modal-body">
+                <div class="alert info" style="margin-bottom:10px"><span>将创建子工单承接本轮结论：上一轮结论 + 你的新目标合并注入 worker，先经路由研判生成任务书再执行。操作范围继承本轮冻结圈定，扩权需另行建单。</span></div>
+                <div class="form-item"><label>上一轮结论（自动携带，只读）</label>
+                    <div id="ab-f-prev" class="ab-args" style="max-height:150px;overflow:auto"></div></div>
+                <div class="form-item"><label>下一轮工作目标 *（人工填写：在上一轮基础上还要做什么）</label>
+                    <textarea class="textarea" id="ab-f-objective" rows="4" placeholder="如：按上一轮建议清理 /data 下 30 天前的日志，清理后复核使用率降到 70% 以下"></textarea></div>
+                <div class="form-row">
+                    <div class="form-item"><label>子单标题（留空自动命名）</label><input class="input" id="ab-f-title" maxlength="200" placeholder="默认：原标题（续派 · 第N轮）"></div>
+                    <div class="form-item"><label>执行档案</label><select class="select" id="ab-f-profile"></select></div>
+                </div>
+                <div class="ab-kv"><span>继承范围</span><div id="ab-f-scope" class="muted" style="font-size:12px"></div></div>
+            </div>
+            <div class="modal-footer">
+                <span class="muted" style="font-size:12px;margin-right:auto">预算与高危审批沿用 Agent 设置 · 子单独立计轮次</span>
+                <button class="btn btn-ghost" data-close>取消</button>
+                <button class="btn btn-primary" id="ab-f-submit">续派并执行</button>
+            </div>
         </div>
     </div>`;
 }
@@ -486,10 +515,19 @@ const profileNameOf = t => {
 
 function ticketActions(t) {
     const btns = [`<button class="btn btn-ghost btn-sm" data-tk-view="${esc(t.id)}">详情</button>`];
+    if (t.stage === 'person/confirm') {
+        btns.push(`<button class="btn btn-primary btn-sm" data-write data-module="ai" data-tk-confirm="${esc(t.id)}">确认派工</button>`);
+        btns.push(`<button class="btn btn-ghost btn-sm" data-write data-module="ai" data-tk-drop="${esc(t.id)}">丢弃</button>`);
+        return btns.join(' ');
+    }
     if (t.status !== 'ended') {
         if (t.stage === 'person/review') btns.push(`<button class="btn btn-primary btn-sm" data-write data-module="ai" data-tk-accept="${esc(t.id)}">验收</button>`);
         if (['person/failed', 'person/blocked'].includes(t.stage)) btns.push(`<button class="btn btn-ghost btn-sm" data-write data-module="ai" data-tk-retry="${esc(t.id)}">重试</button>`);
         btns.push(`<button class="btn btn-danger btn-sm" data-write data-module="ai" data-tk-stop="${esc(t.id)}">停止</button>`);
+    }
+    // 有结论即可续派（含受阻/失败/已验收）：带上轮结论 + 人工新目标开下一轮
+    if ((t.reports || []).length && !['person/confirm', 'working/queued', 'routing/brief'].includes(t.stage)) {
+        btns.push(`<button class="btn btn-ghost btn-sm" data-write data-module="ai" data-tk-followup="${esc(t.id)}">续派</button>`);
     }
     return btns.join(' ');
 }
@@ -497,10 +535,10 @@ function ticketActions(t) {
 function paintTickets() {
     const body = rootEl.querySelector('#ab-tk-body');
     const list = tickets.filter(t => !stageFilter || t.stage === stageFilter);
-    if (!list.length) { body.innerHTML = emptyRow(9, '暂无工单：自动接单或手动建单后出现在这里'); return; }
+    if (!list.length) { body.innerHTML = emptyRow(9, '暂无工单：自动接单、对话接单或手动建单后出现在这里'); return; }
     body.innerHTML = list.map(t => `<tr>
-        <td><strong>${esc(t.title)}</strong>${t.manual ? ' <span class="badge purple">人工</span>' : ''}</td>
-        <td class="muted" style="font-size:11.5px">${esc(t.source)}${t.externalId ? `<div class="mono" style="font-size:11px">${esc(t.externalId)}</div>` : ''}</td>
+        <td><strong>${esc(t.title)}</strong>${t.manual ? ' <span class="badge purple">人工</span>' : ''}${(t.round || 1) > 1 ? ` <span class="badge blue">第${t.round}轮</span>` : ''}</td>
+        <td class="muted" style="font-size:11.5px">${esc(SOURCE_LABEL[t.source] || t.source)}${t.followUpOf ? ` <button class="btn btn-ghost btn-sm" style="padding:0 4px;font-size:11px" data-tk-view="${esc(t.followUpOf)}">↑ 上一轮</button>` : ''}${t.externalId ? `<div class="mono" style="font-size:11px">${esc(t.externalId)}</div>` : ''}</td>
         <td>${badge(SEVERITY, t.severity)}</td>
         <td>${badge(STAGES, t.stage)}</td>
         <td class="muted" style="font-size:12px">${t.roundsUsed || 0}/${(t.budget || {}).maxRounds || '-'}</td>
@@ -526,6 +564,8 @@ const scopeText = scope => {
 function detailHtml(t) {
     const sec = (title, inner) => `<div class="ab-detail-sec"><div class="ab-detail-sec-title">${title}</div>${inner}</div>`;
     const trigger = triggers.find(x => x.id === t.triggerId);
+    const children = tickets.filter(x => x.followUpOf === t.id);
+    const parentTitle = id => { const p = tickets.find(x => x.id === id); return p ? p.title : id; };
     const reports = (t.reports || []).map(r => `
         <div class="ab-report">
             ${badge(REPORT_STATUS, r.status)} <span class="muted" style="font-size:11px">${esc(shortTime(r.at))}</span>
@@ -548,8 +588,8 @@ function detailHtml(t) {
     return `
     <div class="ab-detail-meta">
         ${badge(STAGES, t.stage)} ${badge(SEVERITY, t.severity)} ${badge(WB_STATUS, wb.status)}
-        ${t.status === 'ended' ? `<span class="badge gray">处置：${esc(t.disposition || '-')}</span>` : ''}
-        <span class="muted" style="font-size:12px">来源 ${esc(t.source)}${t.externalId ? ' · 外部 ID ' + esc(t.externalId) : ''} · 创建 ${esc(shortTime(t.createdAt))}${t.endedAt ? ' · 结束 ' + esc(shortTime(t.endedAt)) : ''}</span>
+        ${t.status === 'ended' ? `<span class="badge gray">处置：${esc(DISPOSITION[t.disposition] || t.disposition || '-')}</span>` : ''}
+        <span class="muted" style="font-size:12px">来源 ${esc(SOURCE_LABEL[t.source] || t.source)}${t.externalId ? ' · 外部 ID ' + esc(t.externalId) : ''} · 创建 ${esc(shortTime(t.createdAt))}${t.endedAt ? ' · 结束 ' + esc(shortTime(t.endedAt)) : ''}</span>
     </div>
     ${sec('范围与预算（接单时冻结，扩权 = 新工单）', `
         <div class="ab-kv"><span>操作范围</span><div>${esc(scopeText(t.scope))}</div></div>
@@ -561,6 +601,16 @@ function detailHtml(t) {
     ${t.assessment ? sec('接单研判（只读评估，不构成额外授权）', `
         <div class="ab-kv"><span>结论</span><div>${t.assessment.accept ? '<span class="badge green">接单</span>' : '<span class="badge gray">不接单</span>'} ${esc(t.assessment.reason || '')}</div></div>
         ${t.assessment.suggestedScope ? `<div class="ab-kv"><span>建议范围</span><div class="mono" style="font-size:11.5px">${esc(JSON.stringify(t.assessment.suggestedScope))}</div></div>` : ''}`) : ''}
+    ${t.brief ? sec('派单任务书（路由研判 · 主 agent → worker）', `
+        <div class="ab-kv"><span>总目标</span><div><strong>${esc(t.brief.goal || '')}</strong></div></div>
+        ${(t.brief.plan || []).length ? `<div class="ab-kv"><span>执行步骤</span><div><ol style="margin:0;padding-left:18px">${t.brief.plan.map(s => `<li style="font-size:12.5px;margin:2px 0">${esc(s)}</li>`).join('')}</ol></div></div>` : ''}
+        ${t.brief.focus ? `<div class="ab-kv"><span>排查重点</span><div>${esc(t.brief.focus)}</div></div>` : ''}
+        ${t.brief.acceptance ? `<div class="ab-kv"><span>完成标准</span><div>${esc(t.brief.acceptance)}</div></div>` : ''}
+        <div class="muted" style="font-size:11px;margin-top:4px">生成于 ${esc(shortTime(t.brief.at))} · 已作为 worker 首条派工指令注入上下文</div>`)
+        : t.briefError ? sec('派单任务书', `<div class="alert warn"><span>研判未产出任务书：${esc(t.briefError)}（worker 按原始工单指令执行，不影响派工）</span></div>`) : ''}
+    ${t.followUpOf || children.length ? sec('续派链（结论承接，范围继承冻结）', `
+        ${t.followUpOf ? `<div class="ab-kv"><span>上一轮</span><div><button class="btn btn-ghost btn-sm" data-tk-view="${esc(t.followUpOf)}">${esc(parentTitle(t.followUpOf))}</button> <span class="muted" style="font-size:11.5px">本轮目标与上轮结论已合并注入 worker</span></div></div>` : ''}
+        ${children.map(c => `<div class="ab-kv"><span>第${c.round || '?'}轮</span><div><button class="btn btn-ghost btn-sm" data-tk-view="${esc(c.id)}">${esc(c.title)}</button> ${badge(STAGES, c.stage)}</div></div>`).join('')}`) : ''}
     ${trigger ? sec('触发候选原文（不可信外部数据）', `<pre class="ab-args">${esc(JSON.stringify(trigger.payload, null, 2).slice(0, 3000))}</pre>`) : ''}
     ${sec(`报告序列（${(t.reports || []).length}）`, reports)}
     ${sec(`工具轨迹（${(t.trace || []).length}）`, trace)}
@@ -608,6 +658,15 @@ async function ticketOp(kind, id) {
         if (!confirm(`停止「${title}」？\n人工停止 = Mandate 撤回：永不自动复活，再工作需新接单。`)) return;
     } else if (kind === 'retry') {
         if (!guardWrite('重试 Agent 工单', 'ai')) return;
+    } else if (kind === 'confirm') {
+        if (!guardWrite('确认对话工单', 'ai')) return;
+        const observe = routerState && routerState.routerMode === 'observe';
+        if (!confirm(observe
+            ? `确认「${title}」？\n当前路由为演练模式（observe）：确认后仅记录留痕，不会派工执行。`
+            : `确认派工「${title}」？\n确认后先由路由研判生成任务书（目标/步骤/完成标准），再交 worker 执行（范围与预算已在草稿生成时冻结）。`)) return;
+    } else if (kind === 'drop') {
+        if (!guardWrite('丢弃对话工单草稿', 'ai')) return;
+        if (!confirm(`丢弃草稿「${title}」？丢弃后归档，不会执行。`)) return;
     }
     try {
         const res = await api.ai.tickets[kind](id);
@@ -618,12 +677,70 @@ async function ticketOp(kind, id) {
                 : wb.status === 'failed' ? '已验收，但回写失败：请在待办中重试回写'
                 : wb.status === 'dryrun' ? '已验收（路由演练模式：回写仅记录 dry-run）'
                 : '已验收，工单结束', wb.status === 'failed' ? 'warn' : 'success');
+        } else if (kind === 'confirm') {
+            toast(res.recorded ? '已确认（路由演练模式：仅记录，不派工）' : '已确认派工：路由研判生成任务书后执行', 'success');
+        } else if (kind === 'drop') {
+            toast('草稿已丢弃', 'success');
         } else {
             toast(kind === 'stop' ? '工单已停止（不会自动复活）' : '已重新排队派工', 'success');
         }
         refresh();
     } catch (err) {
         toast('操作失败：' + err.message, 'danger');
+    }
+}
+
+/* ------------------------------------------------------------------
+ * 续派下一轮（带上轮结论 + 人工新目标）
+ * ------------------------------------------------------------------ */
+
+async function openFollowUp(id) {
+    if (!guardWrite('续派 Agent 工单', 'ai')) return;
+    let t = tickets.find(x => x.id === id);
+    try {
+        const res = await api.ai.tickets.get(id);
+        if (res && res.ok && res.ticket) t = res.ticket;
+    } catch { /* 用列表缓存兜底 */ }
+    if (!t) { toast('工单不存在', 'warn'); return; }
+    const reports = t.reports || [];
+    if (!reports.length) { toast('该工单还没有执行结论，无法续派', 'warn'); return; }
+    followUpId = id;
+    const prev = reports[reports.length - 1];
+    const prevText = `[${(REPORT_STATUS[prev.status] || {}).label || prev.status}] ${prev.summary || ''}` +
+        (prev.evidence ? `\n证据：${prev.evidence}` : '') +
+        (prev.question ? `\n遗留问题：${prev.question}` : '');
+    rootEl.querySelector('#ab-f-prev').textContent = prevText;
+    rootEl.querySelector('#ab-f-objective').value = '';
+    rootEl.querySelector('#ab-f-title').value = '';
+    rootEl.querySelector('#ab-f-title').placeholder = `${t.title}（续派 · 第${(t.round || 1) + 1}轮）`;
+    rootEl.querySelector('#ab-f-profile').innerHTML = `<option value="">继承上一轮（${esc(profileNameOf(t))}）</option>` +
+        profiles.map(p => `<option value="${esc(p.id)}">${esc(p.name)}（${esc(p.model)}）</option>`).join('');
+    rootEl.querySelector('#ab-f-scope').textContent = scopeText(t.scope);
+    rootEl.querySelector('#ab-followup-modal').classList.add('open');
+}
+
+async function submitFollowUp() {
+    if (!guardWrite('续派 Agent 工单', 'ai')) return;
+    const objective = rootEl.querySelector('#ab-f-objective').value.trim();
+    if (!objective) { toast('下一轮工作目标不能为空', 'warn'); return; }
+    const payload = {
+        objective,
+        title: rootEl.querySelector('#ab-f-title').value.trim(),
+        profileId: rootEl.querySelector('#ab-f-profile').value
+    };
+    const btn = rootEl.querySelector('#ab-f-submit');
+    btn.disabled = true;
+    try {
+        const res = await api.ai.tickets.followup(followUpId, payload);
+        if (!res || !res.ok) { toast((res && res.message) || '续派失败', 'warn'); return; }
+        rootEl.querySelector('#ab-followup-modal').classList.remove('open');
+        toast('已续派：子单承接上轮结论，研判生成任务书后执行', 'success');
+        refresh();
+        if (res.ticket && res.ticket.id) openDetail(res.ticket.id);
+    } catch (err) {
+        toast('续派失败：' + err.message, 'danger');
+    } finally {
+        btn.disabled = false;
     }
 }
 
@@ -823,9 +940,10 @@ export async function mount(root) {
         });
     });
 
-    /* 动态按钮统一委托 */
-    root.addEventListener('click', e => {
-        const el = e.target.closest('[data-att-answer],[data-att-approve],[data-att-reject],[data-att-wbretry],[data-tk-view],[data-tk-accept],[data-tk-retry],[data-tk-stop],[data-trg-accept],[data-col-run],[data-col-edit],[data-col-del]');
+    /* 动态按钮统一委托（具名持有，重复 mount 先退订，避免 #content 复用导致一次点击触发 N 次） */
+    if (rootClickHandler) root.removeEventListener('click', rootClickHandler);
+    rootClickHandler = e => {
+        const el = e.target.closest('[data-att-answer],[data-att-approve],[data-att-reject],[data-att-wbretry],[data-tk-view],[data-tk-accept],[data-tk-retry],[data-tk-stop],[data-tk-confirm],[data-tk-drop],[data-tk-followup],[data-trg-accept],[data-col-run],[data-col-edit],[data-col-del]');
         if (!el) return;
         const d = el.dataset;
         if (d.attAnswer !== undefined) {
@@ -848,6 +966,12 @@ export async function mount(root) {
             ticketOp('retry', d.tkRetry);
         } else if (d.tkStop !== undefined) {
             ticketOp('stop', d.tkStop);
+        } else if (d.tkConfirm !== undefined) {
+            ticketOp('confirm', d.tkConfirm);
+        } else if (d.tkDrop !== undefined) {
+            ticketOp('drop', d.tkDrop);
+        } else if (d.tkFollowup !== undefined) {
+            openFollowUp(d.tkFollowup);
         } else if (d.trgAccept !== undefined) {
             (async () => {
                 if (!guardWrite('采纳候选建单', 'ai')) return;
@@ -865,11 +989,13 @@ export async function mount(root) {
         } else if (d.colDel !== undefined) {
             collectorOp('del', d.colDel);
         }
-    });
+    };
+    root.addEventListener('click', rootClickHandler);
 
     $('#ab-refresh').addEventListener('click', () => refresh());
     $('#ab-create').addEventListener('click', openCreate);
     $('#ab-c-submit').addEventListener('click', submitCreate);
+    $('#ab-f-submit').addEventListener('click', submitFollowUp);
     $('#ab-col-new').addEventListener('click', () => openCollector(null));
     $('#ab-cl-mode').addEventListener('change', paintCollectorMode);
     $('#ab-cl-submit').addEventListener('click', submitCollector);

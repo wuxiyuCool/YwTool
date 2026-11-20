@@ -103,6 +103,7 @@ const validChannels = [
     'ai:collectors:list', 'ai:collectors:save', 'ai:collectors:delete', 'ai:collectors:run',
     'ai:triggers:list', 'ai:tickets:list', 'ai:contract:validate',
     'ai:router:state', 'ai:tickets:get', 'ai:tickets:create', 'ai:tickets:accept', 'ai:tickets:stop', 'ai:tickets:retry',
+    'ai:tickets:confirm', 'ai:tickets:drop', 'ai:tickets:followup',
     'ai:triggers:accept', 'ai:attention:list', 'ai:attention:answer', 'ai:writeback:get', 'ai:writeback:save'
 ];
 

@@ -713,8 +713,8 @@ const TOOLS = {
     /** B2 结构化收尾报告（dsh Report 语义）：面板按状态徽章区分「完成/等人/失败」，不靠自由文本猜 */
     agent_report: {
         name: 'agent_report',
-        label: '任务收尾报告',
-        desc: '报告结构化状态：progress=阶段进展播报（不结束任务，可继续干活）；ready=完成且结果可用；blocked=需要人决策或提供信息才能继续（必须给 question）；failed=尝试过但无法完成；dropped=检查后确认无需动作。除 progress 外调用即结束当前任务回合',
+        label: '任务状态报告',
+        desc: '报告结构化状态：progress=阶段进展播报（不结束任务，可继续干活；长任务每完成 2~3 个工具步骤播报一次，summary 必须含新信息，无新进展时重复播报会被平台判为空转）；ready=完成且结果可用；blocked=需要人决策或提供信息才能继续（必须给 question）；failed=尝试过但无法完成；dropped=检查后确认无需动作。除 progress 外调用即结束当前任务回合',
         risk: '只读',
         gate: null,
         schema: {
@@ -737,6 +737,41 @@ const TOOLS = {
             return {
                 ok: true,
                 report: { status, summary, evidence: String(args.evidence || '').trim() || undefined, question: question || undefined }
+            };
+        }
+    },
+
+    /** §6.12 对话接单（D20~D22）：多轮对话研判后生成工单草稿，人工在工作台确认后才派工 */
+    propose_ticket: {
+        name: 'propose_ticket',
+        label: '生成工单草稿',
+        desc: '把与用户对话澄清后的运维问题生成结构化工单草稿（标题/严重度/范围/详情）。草稿不会执行，需人工到「系统运维 → Agent 工作台」确认后才派工。仅在用户要求把问题立为工单处理时使用；范围只能引用 list_hosts/list_db_sources 给出的真实 id',
+        risk: '只读',
+        gate: null,
+        schema: {
+            type: 'object',
+            properties: {
+                title: { type: 'string', description: '不超过 40 字的工单标题' },
+                detail: { type: 'string', description: '问题详情：现象/影响/对话中澄清的目标与期望结果/已核实的关键事实' },
+                severity: { type: 'string', enum: ['critical', 'high', 'medium', 'low'], description: '严重度，缺省 medium' },
+                hostIds: { type: 'array', items: { type: 'string' }, description: '涉及的平台主机 id（可空）' },
+                dbIds: { type: 'array', items: { type: 'string' }, description: '涉及的数据源 id（可空）' },
+                profileId: { type: 'string', description: '可选：指定执行档案 id，留空跟随全局默认' }
+            },
+            required: ['title', 'detail']
+        },
+        async run(args = {}, ctx = {}) {
+            // worker 执行中禁止再建单：扩权 = 新工单，必须人工发起（防递归派工）
+            if (ctx.user === 'agent-worker') return { ok: false, error: '工单执行中不能再生成新工单（范围扩张需人工另行发起）' };
+            const router = require('./agentRouter');   // 延迟加载避免 agentTools↔agentRouter 循环依赖
+            const r = router.proposeTicket({
+                title: args.title, detail: args.detail, severity: args.severity,
+                scope: { hostIds: args.hostIds, dbIds: args.dbIds }, profileId: args.profileId
+            });
+            if (!r.ok) return { ok: false, error: r.message };
+            return {
+                ok: true, ticketId: r.ticket.id, title: r.ticket.title, severity: r.ticket.severity, scope: r.ticket.scope,
+                note: '草稿已生成，尚未执行。请告知用户草稿标题与范围，并提示到「系统运维 → Agent 工作台」确认派工（演练模式下确认仅记录不执行）'
             };
         }
     },

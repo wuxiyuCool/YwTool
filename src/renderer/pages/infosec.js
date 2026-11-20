@@ -12,6 +12,7 @@ import { api, demoMode } from '../api.js';
 import { esc, toast, demoBanner, guardAdmin } from '../ui.js';
 
 let root = null;
+let rootClickHandler = null;   // 委托监听具名持有：#content 跨导航复用，重复 mount 先退订防累积
 
 const copyBtn = '<button class="btn btn-ghost btn-sm sec-copy" title="复制到剪贴板">复制</button>';
 const outBox = (id, mono = true) => `<div class="sec-out ${mono ? 'mono' : ''}" id="${id}">—</div>`;
@@ -480,7 +481,8 @@ export async function mount(r) {
     root.querySelector('#rsa-sign').addEventListener('click', () => runRsa('sign'));
     root.querySelector('#rsa-verify').addEventListener('click', () => runRsa('verify'));
 
-    root.addEventListener('click', e => {
+    if (rootClickHandler) root.removeEventListener('click', rootClickHandler);
+    rootClickHandler = e => {
         const btn = e.target.closest('.sec-copy');
         if (!btn) return;
         const scope = btn.closest('.card') || btn.closest('.toolbar').parentElement;
@@ -489,7 +491,8 @@ export async function mount(r) {
         if (text && text !== '—') {
             navigator.clipboard.writeText(text).then(() => toast('已复制', 'success'), () => toast('复制失败', 'warn'));
         }
-    });
+    };
+    root.addEventListener('click', rootClickHandler);
 
     try {
         const algs = await api.sec.ciphers();

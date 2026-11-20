@@ -172,6 +172,9 @@ function demoFallback(channel, data) {
         case 'ai:tickets:accept': return { ok: true, writeback: { status: 'none' } };
         case 'ai:tickets:stop': return { ok: true };
         case 'ai:tickets:retry': return { ok: true };
+        case 'ai:tickets:confirm': return { ok: true, ticket: { id: (data && data.id) || 'tk_demo', stage: 'routing/brief', status: 'open' } };
+        case 'ai:tickets:drop': return { ok: true };
+        case 'ai:tickets:followup': return { ok: true, ticket: { id: 'tk_demo_fu', title: (data && data.title) || '演示工单（续派 · 第2轮）', source: 'followup', followUpOf: (data && data.id) || 'tk_demo', round: 2, stage: 'routing/brief', status: 'open' } };
         case 'ai:triggers:accept': return { ok: true, ticket: { id: 'tk_demo', stage: 'working/queued' } };
         case 'ai:router:state': return demo.demoRouterState();
         case 'ai:attention:list': return { ok: true, attention: demo.demoAgentAttention };
@@ -700,7 +703,10 @@ export const api = {
             create: payload => invoke('ai:tickets:create', payload),
             accept: id => invoke('ai:tickets:accept', { id }),
             stop: id => invoke('ai:tickets:stop', { id }),
-            retry: id => invoke('ai:tickets:retry', { id })
+            retry: id => invoke('ai:tickets:retry', { id }),
+            confirm: id => invoke('ai:tickets:confirm', { id }),
+            drop: id => invoke('ai:tickets:drop', { id }),
+            followup: (id, payload) => invoke('ai:tickets:followup', { id, ...payload })
         },
         router: { state: () => invoke('ai:router:state') },
         attention: {

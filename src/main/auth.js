@@ -68,7 +68,7 @@ const ADMIN_ONLY = new Set([
     'ai:agent:save'
 ]);
 
-const WRITE_PATTERN = /:(save|delete|toggle|run|runNow|runScript|exec|execOne|reset|reveal|cleanup|append|lint|loginTest|ack|ackAll|test|password|export|import|chat|abort|generate|optimize|clear|new|switch|open|activate|use)$/;
+const WRITE_PATTERN = /:(save|delete|toggle|run|runNow|runScript|exec|execOne|reset|reveal|cleanup|append|lint|loginTest|ack|ackAll|test|password|export|import|chat|abort|generate|optimize|clear|new|switch|open|activate|use|create|accept|stop|retry|answer|confirm|drop|followup)$/;
 
 /** 会话容器：本地单机部署，按用户名维护，支持多人分别登录（如同时开多个窗口） */
 const sessions = new Map();

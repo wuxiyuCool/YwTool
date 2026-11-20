@@ -357,6 +357,24 @@ function setup(ipcMain) {
         return result;
     });
 
+    ipcMain.handle('ai:tickets:confirm', (e, { id } = {}) => {
+        const result = agentRouter.confirmTicket(String(id || ''), operator());
+        if (result.ok) log(`确认对话工单草稿 ${id}${result.recorded ? '（演练：仅记录）' : ' 派工'}`);
+        return result;
+    });
+
+    ipcMain.handle('ai:tickets:drop', (e, { id } = {}) => {
+        const result = agentRouter.dropTicket(String(id || ''), operator());
+        if (result.ok) log(`丢弃对话工单草稿 ${id}`);
+        return result;
+    });
+
+    ipcMain.handle('ai:tickets:followup', (e, { id, objective, title, profileId } = {}) => {
+        const result = agentRouter.followUpTicket(String(id || ''), { objective, title, profileId }, operator());
+        if (result.ok) log(`续派 AI 工单 ${id} →「${result.ticket.title}」`);
+        return result;
+    });
+
     ipcMain.handle('ai:triggers:accept', (e, { id, profileId } = {}) => {
         const result = agentRouter.acceptTrigger(String(id || ''), { profileId });
         if (result.ok) log(`人工采纳 AI 候选 ${id} 建单`);

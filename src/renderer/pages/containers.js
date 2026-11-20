@@ -32,6 +32,7 @@ const state = {
 };
 
 let root = null;
+let rootClickHandler = null;   // 委托监听具名持有：#content 跨导航复用，重复 mount 先退订防累积
 
 const activeHost = () => state.hosts.find(h => h.id === state.activeHostId) || null;
 const activeCluster = () => state.clusters.find(c => c.id === state.activeClusterId) || null;
@@ -968,7 +969,8 @@ export async function mount(r) {
     root.querySelector('#kt-cmd').addEventListener('keydown', e => { if (e.key === 'Enter') ktRun(); });
 
     /* ---- 命令速查 ---- */
-    root.addEventListener('click', e => {
+    if (rootClickHandler) root.removeEventListener('click', rootClickHandler);
+    rootClickHandler = e => {
         const copy = e.target.closest('[data-copy]');
         if (copy) {
             navigator.clipboard.writeText(copy.dataset.copy)
@@ -985,7 +987,8 @@ export async function mount(r) {
             root.querySelector('#kt-cmd').focus();
             toast('命令已送入 kubectl 终端（可修改后执行）', 'info');
         }
-    });
+    };
+    root.addEventListener('click', rootClickHandler);
 
     /* ---- 通用弹窗关闭 ---- */
     root.querySelectorAll('#dh-modal [data-close], #kc-modal [data-close], #dout-modal [data-close]').forEach(el =>
