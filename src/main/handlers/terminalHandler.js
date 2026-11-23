@@ -50,6 +50,39 @@ function destroySession(id, reason) {
 
 function touch(s) { s.lastActive = Date.now(); }
 
+/**
+ * 终端输出解码：优先按 UTF-8 严格解码；非法字节回退 GBK。
+ * H3C 堡垒机横幅等老设备输出 GBK 中文，直接 utf8 解码会乱码。
+ * 同时处理多字节序列被分片截断的情况（尾部不完整字节留到下一块拼接）。
+ */
+function decodeChunk(buf, sess) {
+    const merged = sess.rawTail ? Buffer.concat([sess.rawTail, buf]) : buf;
+    sess.rawTail = null;
+    try {
+        return new TextDecoder('utf-8', { fatal: true }).decode(merged);
+    } catch (e) {
+        const tail = utf8IncompleteLen(merged);
+        const body = tail ? merged.subarray(0, merged.length - tail) : merged;
+        if (tail) sess.rawTail = Buffer.from(merged.subarray(merged.length - tail));
+        if (body.length) {
+            try { return new TextDecoder('utf-8', { fatal: true }).decode(body); } catch (e2) { /* 非 UTF-8，走 GBK */ }
+        }
+        try { return new TextDecoder('gbk').decode(merged); } catch (e3) { return merged.toString('utf8'); }
+    }
+}
+
+/** 末尾不完整 UTF-8 序列的字节数（0-3） */
+function utf8IncompleteLen(buf) {
+    const n = buf.length;
+    for (let i = n - 1; i >= Math.max(0, n - 4); i--) {
+        const b = buf[i];
+        if ((b & 0xC0) === 0x80) continue;
+        const need = (b & 0xE0) === 0xC0 ? 2 : (b & 0xF0) === 0xE0 ? 3 : (b & 0xF8) === 0xF0 ? 4 : 1;
+        return need > n - i ? n - i : 0;
+    }
+    return 0;
+}
+
 /** 空闲回收轮询 */
 const reaper = setInterval(() => {
     const now = Date.now();
@@ -99,12 +132,12 @@ function setup(ipcMain) {
                     return;
                 }
                 settled = true;
-                const sess = { conn, stream, hostId, hostName: `${host.name}（${host.ip}）`, lastActive: Date.now(), closed: false, buf: '' };
+                const sess = { conn, stream, hostId, hostName: `${host.name}（${host.ip}）`, lastActive: Date.now(), closed: false, buf: '', rawTail: null };
                 sessions.set(sessionId, sess);
                 const onData = chunk => {
                     if (!sessions.has(sessionId)) return;
                     touch(sess);
-                    const text = chunk.toString('utf8');
+                    const text = decodeChunk(chunk, sess);
                     sess.buf = (sess.buf + text).slice(-OUTPUT_BUF_LIMIT);   // 保留最近输出供 Agent 回溯
                     push(targetWin, 'terminal:data', { sessionId, chunk: text });
                 };
@@ -119,11 +152,19 @@ function setup(ipcMain) {
         });
 
         const auth = ssh.authOptions(host);
-        if (!auth) { clearTimeout(timer); return { ok: false, message: '未配置认证信息：私钥认证需指定私钥文件路径，或改用密码认证' }; }
-        conn.connect({
-            host: host.ip, port: host.port || 22, username: host.user,
-            readyTimeout: 15000, keepaliveInterval: 15000, algorithms: ssh.FAST_ALGORITHMS, ...auth
-        });
+        if (!auth) { clearTimeout(timer); return { ok: false, message: ssh.MISSING_AUTH }; }
+        ssh.wireAuthCompat(conn, auth);
+        try {
+            conn.connect({
+                host: host.ip, port: host.port || 22, username: host.user,
+                readyTimeout: 15000, keepaliveInterval: 15000, tryKeyboard: !!auth.password,
+                algorithms: ssh.algorithmsFor(host), ...auth
+            });
+        } catch (err) {
+            clearTimeout(timer);
+            try { conn.end(); } catch (e2) { /* ignore */ }
+            return { ok: false, message: 'SSH 连接初始化失败：' + err.message };
+        }
 
         return { ok: true, sessionId, hostName: `${host.name}（${host.ip}）` };
     });

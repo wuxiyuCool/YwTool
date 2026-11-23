@@ -15,6 +15,7 @@ function loadSsh2() {
 }
 
 const MISSING_DEP = '未安装 ssh2 依赖，请先执行：npm install ssh2';
+const MISSING_AUTH = '未配置认证信息：密码认证请编辑主机补录登录密码；密钥认证请指定私钥文件路径或粘贴私钥';
 
 /**
  * 算法优选：优先协商 Node 原生 OpenSSL 加速的套件（curve25519/ECDH、aes-gcm、etm），
@@ -33,10 +34,30 @@ const FAST_ALGORITHMS = {
     compress: ['none', 'zlib@openssh.com', 'zlib']
 };
 
+/**
+ * 兼容旧设备（H3C 堡垒机等）的算法套件：
+ * 对应 OpenSSH 的 HostKeyAlgorithms=+ssh-rsa,ssh-dss / PubkeyAcceptedAlgorithms=+ssh-rsa,ssh-dss。
+ * 注意：只能追加 ssh2 在当前运行时确实支持的算法——ssh2 遇到不支持的算法会在 connect() 里同步抛错。
+ * 因此这里只补 diffie-hellman-group1-sha1 与 ssh-dss；blowfish/cast/arcfour/3des 等旧加密
+ * 在 Node 24（OpenSSL 3 默认 provider）和 Electron（BoringSSL）中已不可用，加了只会崩。
+ */
+const uniq = arr => [...new Set(arr)];
+const LEGACY_ALGORITHMS = {
+    kex: uniq([...FAST_ALGORITHMS.kex, 'diffie-hellman-group1-sha1']),
+    cipher: FAST_ALGORITHMS.cipher,
+    hmac: FAST_ALGORITHMS.hmac,
+    serverHostKey: uniq([...FAST_ALGORITHMS.serverHostKey, 'ssh-dss']),
+    compress: ['none', 'zlib@openssh.com', 'zlib']
+};
+
+/** 主机级算法选择：host.legacyAlgos 为真走旧设备兼容套件，否则走加速套件 */
+const algorithmsFor = host => (host && host.legacyAlgos ? LEGACY_ALGORITHMS : FAST_ALGORITHMS);
+
 /** 按主机配置组装认证参数（password/key 二选一；外置密钥文件优先） */
 function authOptions(host) {
     if (host.authType === 'password') {
-        return { password: secrets.resolve('host:' + host.id, host.password) };
+        const pwd = secrets.resolve('host:' + host.id, host.password);
+        return pwd ? { password: pwd } : null;
     }
     if (host.keyPath && fs.existsSync(host.keyPath)) {
         const out = { privateKey: fs.readFileSync(host.keyPath) };
@@ -45,6 +66,18 @@ function authOptions(host) {
     }
     if (host.privateKey) return { privateKey: host.privateKey };
     return null;
+}
+
+/**
+ * 为连接接入口令挑战认证（keyboard-interactive）。
+ * H3C 等堡垒机常把口令登录放在 keyboard-interactive 方法下，只发 password 方法会被拒；
+ * 需在 connect 时同时置 tryKeyboard: true，并在此自动应答首个提示为登录密码。
+ */
+function wireAuthCompat(conn, auth) {
+    if (!auth || !auth.password) return;
+    conn.on('keyboard-interactive', (name, instructions, lang, prompts, finish) => {
+        finish(prompts.map((p, i) => (i === 0 ? auth.password : '')));
+    });
 }
 
 /** 单主机执行命令（一次连接，执行完即断开）；maxOutput 可按调用方需要放宽（如 kubectl -o json） */
@@ -99,17 +132,25 @@ function execOnHost(host, cmd, timeoutSec = 30, maxOutput = 20000) {
         const auth = authOptions(host);
         if (!auth) {
             clearTimeout(timer);
-            return finish({ error: '未配置认证信息：私钥认证需指定私钥文件路径，或改用密码认证' });
+            return finish({ error: MISSING_AUTH });
         }
-        conn.connect({
-            host: host.ip,
-            port: host.port || 22,
-            username: host.user,
-            readyTimeout: Math.max(timeoutSec, 10) * 1000,
-            keepaliveInterval: 10000,
-            algorithms: FAST_ALGORITHMS,
-            ...auth
-        });
+        wireAuthCompat(conn, auth);
+        try {
+            conn.connect({
+                host: host.ip,
+                port: host.port || 22,
+                username: host.user,
+                readyTimeout: Math.max(timeoutSec, 10) * 1000,
+                keepaliveInterval: 10000,
+                tryKeyboard: !!auth.password,
+                algorithms: algorithmsFor(host),
+                ...auth
+            });
+        } catch (err) {
+            // ssh2 对不支持的算法会同步抛错，不能让它冒泡（调用方 UI 会卡在“连接中”）
+            clearTimeout(timer);
+            finish({ error: 'SSH 连接初始化失败：' + err.message });
+        }
     });
 }
 
@@ -161,18 +202,23 @@ function testConnection(host) {
             try { conn.end(); } catch (e) { /* ignore */ }
             resolve({ ok, message, durationMs: Date.now() - started });
         };
-        const timer = setTimeout(() => finish(false, '连接测试超时（8s）'), 8000);
+        const timer = setTimeout(() => finish(false, '连接测试超时（12s）'), 12000);
 
         conn.on('ready', () => finish(true, 'SSH 连接成功'));
         conn.on('error', err => finish(false, 'SSH 连接失败：' + err.message));
 
         const auth = authOptions(host);
-        if (!auth) return finish(false, '未配置认证信息：私钥认证需指定私钥文件路径，或改用密码认证');
-        conn.connect({
-            host: host.ip, port: host.port || 22, username: host.user,
-            readyTimeout: 8000, algorithms: FAST_ALGORITHMS, ...auth
-        });
+        if (!auth) return finish(false, MISSING_AUTH);
+        wireAuthCompat(conn, auth);
+        try {
+            conn.connect({
+                host: host.ip, port: host.port || 22, username: host.user,
+                readyTimeout: 12000, tryKeyboard: !!auth.password, algorithms: algorithmsFor(host), ...auth
+            });
+        } catch (err) {
+            finish(false, 'SSH 连接初始化失败：' + err.message);
+        }
     });
 }
 
-module.exports = { execOnHost, execBatch, testConnection, authOptions, MISSING_DEP, FAST_ALGORITHMS, hasDriver: () => !!loadSsh2() };
+module.exports = { execOnHost, execBatch, testConnection, authOptions, wireAuthCompat, MISSING_DEP, MISSING_AUTH, FAST_ALGORITHMS, LEGACY_ALGORITHMS, algorithmsFor, hasDriver: () => !!loadSsh2() };

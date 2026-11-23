@@ -11,7 +11,8 @@ export const demoHosts = [
     { id: 'h_05', name: 'db-server-02', ip: '10.0.20.32', port: 22, user: 'oracle', authType: 'password', tags: ['生产', '数据库'], status: 'offline', lastConnectedAt: '2026-09-15 22:10' },
     { id: 'h_06', name: 'bigdata-node-01', ip: '10.0.30.41', port: 22, user: 'root', authType: 'key', tags: ['大数据'], status: 'unknown', lastConnectedAt: '2026-09-16 10:15' },
     { id: 'h_07', name: 'bigdata-node-02', ip: '10.0.30.42', port: 22, user: 'root', authType: 'key', tags: ['大数据'], status: 'unknown', lastConnectedAt: '2026-09-16 10:15' },
-    { id: 'h_08', name: 'test-server-01', ip: '192.168.5.11', port: 22, user: 'root', authType: 'password', tags: ['测试'], status: 'unknown', lastConnectedAt: '2026-09-16 09:31' }
+    { id: 'h_08', name: 'test-server-01', ip: '192.168.5.11', port: 22, user: 'root', authType: 'password', tags: ['测试'], status: 'unknown', lastConnectedAt: '2026-09-16 09:31' },
+    { id: 'h_09', name: 'H3C-10.45.34.48-tomcat', template: 'h3c', legacyAlgos: true, ip: '10.45.60.16', port: 22, user: 'wuxy1613/10.45.34.48/tomcat', authType: 'password', tags: ['堡垒机'], status: 'unknown', lastConnectedAt: null }
 ];
 
 export const demoScripts = [

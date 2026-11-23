@@ -2,12 +2,16 @@
  * 任务执行页（终端工作台，Xshell 风格）
  * ------------------------------------------------------------------
  * 顶部标签：终端工作台 / 批量执行 / 定时任务 / 执行历史
- *   - 终端工作台：左侧主机列表 → 打开交互式 SSH 会话（多标签），零依赖轻量终端仿真
- *     （ANSI SGR 颜色 + 行模式输入 + 滚动缓冲 + 快捷命令栏），数据流 terminal:open/input + terminal:data/exit 推送
+ *   - 终端工作台：左侧主机列表 → 打开交互式 SSH 会话（多标签）。终端由内置的 xterm.js
+ *     （本地 vendor，零运行期依赖）渲染：Tab 补全、光标行内编辑、完整 ANSI 彩色/高亮；
+ *     底部输入框改为「批量命令」，可勾选多个已连接会话同时下发同一命令。
+ *     数据流 terminal:open/input/resize + terminal:data/exit 推送
  *   - 批量执行：命令/脚本先经敏感词校验，主进程并发 SSH，实时进度推送
  *   - 定时任务：schedules:list|save|toggle|delete|runNow（调度器 30s 心跳）
  *   - 执行历史：tasks:list / tasks:detail / tasks:export
  */
+import { Terminal } from '../vendor/xterm/xterm.mjs';
+import { FitAddon } from '../vendor/xterm/addon-fit.mjs';
 import { api, demoMode } from '../api.js';
 import { esc, toast, demoBanner, emptyRow, loadingRow, shortTime, guardWrite, guardAdmin, applyReadonly, promptText } from '../ui.js';
 
@@ -19,7 +23,7 @@ let lastSelected = [];
 let editingScheduleId = null;
 
 /* ---------------- 终端会话状态 ---------------- */
-/** sessionId → { hostName, outEl, scrollback:[], ansi, lastLine } */
+/** sessionId → { hostName, hostId, term, fit, paneEl, closed } */
 const termSessions = new Map();
 let activeSession = null;
 let termUnsubs = [];
@@ -40,73 +44,34 @@ const lastStatusMap = {
     blocked: '<span class="badge amber">已拦截</span>'
 };
 
-/* ---------------- 轻量 ANSI 终端 ---------------- */
+/* ---------------- xterm 终端 ---------------- */
 
-/** SGR 前景/背景色映射（标准 16 色 + 粗体），其余转义序列安全剥离 */
-const FG = { 30: '#3a3a3a', 31: '#e05555', 32: '#57c26b', 33: '#e0b45a', 34: '#5a9de0', 35: '#c25ad1', 36: '#4ec9c9', 37: '#d5d5d5', 90: '#7a7a7a', 91: '#ff6b6b', 92: '#6ee787', 93: '#ffd97a', 94: '#7ab8ff', 95: '#e57bff', 96: '#6fe7e7', 97: '#ffffff' };
-const BG = { 40: '#000', 41: '#5a1d1d', 42: '#1d5a2a', 43: '#5a4a1d', 44: '#1d3a5a', 45: '#5a1d5a', 46: '#1d5a5a', 47: '#c0c0c0', 100: '#3a3a3a', 101: '#8a3a3a', 102: '#3a8a4a', 103: '#8a7a3a', 104: '#3a5a8a', 105: '#8a3a8a', 106: '#3a8a8a', 107: '#ffffff' };
+const TERM_FONT = '"Cascadia Mono", "JetBrains Mono", Consolas, "Courier New", monospace';
+const TERM_THEME = {
+    background: '#1e2430',
+    foreground: '#d5dbe6',
+    cursor: '#7ab8ff',
+    cursorAccent: '#1e2430',
+    selectionBackground: '#33415c',
+    black: '#2b3240', red: '#e05555', green: '#57c26b', yellow: '#e0b45a',
+    blue: '#5a9de0', magenta: '#c25ad1', cyan: '#4ec9c9', white: '#d5dbe6',
+    brightBlack: '#7a7a8a', brightRed: '#ff6b6b', brightGreen: '#6ee787', brightYellow: '#ffd97a',
+    brightBlue: '#7ab8ff', brightMagenta: '#e57bff', brightCyan: '#6fe7e7', brightWhite: '#ffffff'
+};
 
-/** 把一段 ANSI 文本渲染成 HTML span 序列；传入/返回样式状态以支持跨 chunk 着色 */
-function ansiToHtml(text, state) {
-    const st = state || { fg: null, bg: null, bold: false };
-    let out = '';
-    let i = 0;
-    const openSpan = () => `<span style="${st.fg ? `color:${st.fg};` : ''}${st.bg ? `background:${st.bg};` : ''}${st.bold ? 'font-weight:700;' : ''}">`;
-    let pending = '';
-    const flush = () => { if (pending) { out += openSpan() + escHtml(pending); pending = ''; } };
-    while (i < text.length) {
-        const ch = text[i];
-        if (ch === '\x1b') {
-            flush();
-            // OSC：ESC ] ... (BEL | ST) —— 窗口标题等，整段丢弃
-            if (text[i + 1] === ']') {
-                const end = text.indexOf('\x07', i + 2);
-                const st2 = text.indexOf('\x1b\\', i + 2);
-                const stop = end >= 0 ? (st2 >= 0 && st2 < end ? st2 : end) : st2;
-                i = stop >= 0 ? (text[stop] === '\x1b' ? stop + 2 : stop + 1) : text.length;
-                continue;
-            }
-            // CSI：ESC [ 私有参数 中间字节 终止字节（含 ? 等，覆盖 \x1b[?1034h、\x1b[2J、\x1b[?25l）
-            const csi = /^\x1b\[([\x30-\x3f]*)([\x20-\x2f]*)([\x40-\x7e])/.exec(text.slice(i));
-            if (csi) {
-                if (csi[3] === 'm') {
-                    const codes = (csi[1] || '0').split(';').map(x => (x === '' ? 0 : Number(x)));
-                    if (!codes.length || codes[0] === 0) { st.fg = null; st.bg = null; st.bold = false; }
-                    codes.forEach(c => {
-                        if (c === 1) st.bold = true;
-                        else if (c === 22) st.bold = false;
-                        else if (c === 39) st.fg = null;
-                        else if (c === 49) st.bg = null;
-                        else if (c >= 30 && c <= 37 || c >= 90 && c <= 97) st.fg = FG[c];
-                        else if (c >= 40 && c <= 47 || c >= 100 && c <= 107) st.bg = BG[c];
-                    });
-                }
-                // 其它 CSI（光标移动/清屏等）：忽略指令本身，行模式不重绘
-                i += csi[0].length;
-                continue;
-            }
-            // 其它 ESC 序列（如 ESC ( B）：跳过 2 字节
-            i += 2;
-            continue;
-        }
-        // PTY 行结尾是 \r\n：必须输出换行，否则所有内容会横向堆在一行
-        if (ch === '\r') {
-            out += openSpan() + escHtml(pending) + '</span><br>'; pending = '';
-            i += (text[i + 1] === '\n' ? 2 : 1);
-            continue;
-        }
-        if (ch === '\b') { pending = pending.slice(0, -1); i++; continue; }
-        if (ch === '\n') { out += openSpan() + escHtml(pending) + '</span><br>'; pending = ''; i++; continue; }
-        if (ch === '\t') { pending += '    '; i++; continue; }
-        if (ch === '\u0007' || ch.charCodeAt(0) < 32) { i++; continue; }  // 控制字符（BEL 等）丢弃
-        pending += ch;
-        i++;
-    }
-    return { html: out + (pending ? openSpan() + escHtml(pending) : ''), state: st };
-}
-
-function escHtml(s) {
-    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+/** 新建 xterm 实例：Tab 补全、行内编辑、完整 ANSI 彩色的语义都由远端 shell 通过 PTY 回传，xterm 如实渲染 */
+function makeTerminal() {
+    const term = new Terminal({
+        fontFamily: TERM_FONT,
+        fontSize: 13,
+        lineHeight: 1.2,
+        cursorBlink: true,
+        scrollback: 6000,
+        theme: TERM_THEME
+    });
+    const fit = new FitAddon();
+    term.loadAddon(fit);
+    return { term, fit };
 }
 
 /* ---------------- 快捷命令（localStorage 持久化） ---------------- */
@@ -203,7 +168,7 @@ export function render() {
                     <div class="wt-term-placeholder" id="wt-term-placeholder">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M6 9l3 3-3 3M12 15h6"/></svg>
                         <div>未打开会话</div>
-                        <span class="muted" style="font-size:12px">支持多会话并行；行模式交互，ANSI 彩色输出</span>
+                        <span class="muted" style="font-size:12px">支持多会话并行；Tab 补全、彩色高亮，底部可多选会话批量下发命令</span>
                     </div>
                     <!-- 脚本选择浮层 -->
                     <div class="wt-script-pop" id="wt-script-pop" style="display:none">
@@ -219,10 +184,18 @@ export function render() {
                     <button class="btn btn-ghost btn-sm" id="wt-script-btn" title="从脚本库选择并发送到当前会话">脚本库</button>
                     <button class="btn btn-ghost btn-sm" id="wt-quick-add">+ 添加</button>
                 </div>
-                <div class="wt-input-row">
-                    <span class="wt-prompt">$</span>
-                    <textarea class="input mono wt-input" id="wt-input" rows="1" placeholder="输入命令后回车发送（Shift+回车换行；需先连接主机）" autocomplete="off" spellcheck="false"></textarea>
-                    <button class="btn btn-primary btn-sm" id="wt-send" data-write>发送</button>
+                <div class="wt-batch-row">
+                    <div class="wt-batch-head">
+                        <span class="wt-batch-label">批量命令</span>
+                        <div class="wt-targets" id="wt-batch-targets"><span class="muted" style="font-size:12px">暂无已连接会话</span></div>
+                        <button class="btn-link" id="wt-batch-all">全选</button>
+                        <button class="btn-link" id="wt-batch-none">清空</button>
+                    </div>
+                    <div class="wt-input-row">
+                        <span class="wt-prompt">$</span>
+                        <textarea class="input mono wt-input" id="wt-input" rows="1" placeholder="输入命令后回车，下发到勾选的会话（Shift+回车换行；Tab 补全请在终端窗口内使用）" autocomplete="off" spellcheck="false"></textarea>
+                        <button class="btn btn-primary btn-sm" id="wt-send" data-write>发送</button>
+                    </div>
                 </div>
             </section>
         </div>
@@ -361,6 +334,7 @@ export async function mount(root) {
     termUnsubs.forEach(off => { try { off && off(); } catch (e) { /* ignore */ } });
     termUnsubs = [];
     if (docCloseHandler) document.removeEventListener('click', docCloseHandler);
+    termSessions.forEach(s => { try { s.term.dispose(); } catch (e) { /* ignore */ } });
     termSessions.clear();
     activeSession = null;
 
@@ -379,6 +353,7 @@ export async function mount(root) {
         root.querySelectorAll('.wt-panel').forEach(p => { p.style.display = p.dataset.panel === id ? '' : 'none'; });
         if (id === 'hist') refreshHistory();
         if (id === 'sched') refreshSchedules();
+        if (id === 'term') requestAnimationFrame(fitActive);
     });
 
     /* ---------------- 终端工作台 ---------------- */
@@ -404,88 +379,103 @@ export async function mount(root) {
             : '<span class="muted wt-empty-hint" id="wt-empty-hint">从左侧选择主机并「连接」以打开终端会话</span>';
     };
 
-    const focusActiveTerm = () => {
+    const targetEl = root.querySelector('#wt-batch-targets');
+    const sendBtn = root.querySelector('#wt-send');
+    /** 批量下发目标：已连接会话 ID 集合（新会话默认勾选） */
+    const batchTargets = new Set();
+
+    const fitActive = () => {
         const s = termSessions.get(activeSession);
-        if (s && s.outEl) s.outEl.scrollTop = s.outEl.scrollHeight;
+        if (s && !s.closed) { try { s.fit.fit(); } catch (e) { /* 容器不可见时忽略 */ } }
+    };
+
+    const paintBatchTargets = () => {
+        const chips = [...termSessions.entries()].map(([id, s]) =>
+            `<span class="wt-target ${batchTargets.has(id) ? 'on' : ''}" data-target="${esc(id)}" title="${esc(s.hostName)}">${esc(s.hostName)}</span>`);
+        targetEl.innerHTML = chips.length ? chips.join('') : '<span class="muted" style="font-size:12px">暂无已连接会话</span>';
+        const n = [...batchTargets].filter(id => termSessions.has(id)).length;
+        sendBtn.textContent = n ? `发送到 ${n} 个会话` : '发送';
     };
 
     const showSession = (id) => {
         activeSession = id;
-        const s = termSessions.get(id);
-        termBodyEl.querySelectorAll('.wt-term-out').forEach(el => { el.style.display = 'none'; });
+        termSessions.forEach((s, sid) => { if (s.paneEl) s.paneEl.style.display = sid === id ? 'block' : 'none'; });
         const ph = termBodyEl.querySelector('#wt-term-placeholder');
-        if (ph) ph.style.display = 'none';
-        if (s) {
-            if (!s.outEl) {
-                s.outEl = document.createElement('div');
-                s.outEl.className = 'wt-term-out mono';
-                s.outEl.innerHTML = s.bufferHtml || '';
-                termBodyEl.appendChild(s.outEl);
-            } else {
-                s.outEl.style.display = '';
-            }
-            inputEl.placeholder = s.hostName ? `发送到 ${s.hostName}` : '输入命令后回车发送';
-        }
+        if (ph) ph.style.display = termSessions.size ? 'none' : '';
         paintSessionTabs();
-        focusActiveTerm();
-        inputEl.focus();
+        paintBatchTargets();
+        const s = termSessions.get(id);
+        if (s) requestAnimationFrame(() => { fitActive(); s.term.focus(); });
     };
 
-    const appendToSession = (id, text) => {
+    const writeSession = (id, text) => {
         const s = termSessions.get(id);
-        if (!s) return;
-        const res = ansiToHtml(text, s.ansi);
-        s.ansi = res.state;
-        const el = s.outEl && s.outEl.parentNode ? s.outEl : null;
-        if (el) {
-            el.insertAdjacentHTML('beforeend', res.html);
-            // 滚动缓冲上限：超过 4000 行截断旧内容
-            if (el.childElementCount > 4200 || el.innerHTML.length > 400000) {
-                el.innerHTML = el.innerHTML.slice(-200000);
-            }
-            el.scrollTop = el.scrollHeight;
-        } else {
-            s.bufferHtml = (s.bufferHtml || '') + res.html;
-        }
+        if (s && !s.disposed) { try { s.term.write(text); } catch (e) { /* ignore */ } }
     };
 
     const openSession = async (hostId) => {
         if (!guardWrite('打开终端会话')) return;
         const host = hosts.find(h => h.id === hostId);
         if (!host) return;
+        const opened = [...termSessions.entries()].find(([, s]) => s.hostId === hostId);
+        if (opened) { showSession(opened[0]); return; }
         const btn = hostListEl.querySelector(`[data-connect="${hostId}"]`);
         if (btn) { btn.disabled = true; btn.textContent = '连接中'; }
-        const res = await api.terminal.open({ hostId, cols: 100, rows: 30 });
-        if (btn) { btn.disabled = false; btn.textContent = '连接'; }
+        let res;
+        try {
+            res = await api.terminal.open({ hostId, cols: 100, rows: 30 });
+        } catch (err) {
+            toast(err.message || '连接失败', 'danger');
+            return;
+        } finally {
+            if (btn) { btn.disabled = false; btn.textContent = '连接'; }
+        }
         if (!res || !res.ok) { toast((res && res.message) || '连接失败', 'danger'); return; }
-        termSessions.set(res.sessionId, { hostName: res.hostName, hostId, ansi: {}, bufferHtml: '' });
+
+        const { term, fit } = makeTerminal();
+        const paneEl = document.createElement('div');
+        paneEl.className = 'wt-term-pane';
+        termBodyEl.insertBefore(paneEl, termBodyEl.querySelector('#wt-script-pop'));
+        term.open(paneEl);
+        const sess = { hostName: res.hostName, hostId, term, fit, paneEl, closed: false, disposed: false };
+        termSessions.set(res.sessionId, sess);
+        batchTargets.add(res.sessionId);   // 新会话默认加入批量下发
+        // 每一次键入（含 Tab 补全、方向键、Ctrl 组合）原样写入 PTY，交互与本地终端一致
+        term.onData(data => { if (!sess.closed) api.terminal.input(res.sessionId, data); });
+        term.onResize(({ cols, rows }) => { if (!sess.closed) api.terminal.resize(res.sessionId, cols, rows); });
         showSession(res.sessionId);
-        appendToSession(res.sessionId, `\x1b[36m已连接 ${res.hostName}\x1b[0m\r\n`);
+        fitActive();
+        writeSession(res.sessionId, `\x1b[36m已连接 ${res.hostName}\x1b[0m\r\n`);
     };
 
     const closeSession = async (id) => {
-        await api.terminal.close(id);
         const s = termSessions.get(id);
-        if (s && s.outEl && s.outEl.parentNode) s.outEl.remove();
+        if (s) {
+            s.closed = true;
+            s.disposed = true;
+            try { s.term.dispose(); } catch (e) { /* ignore */ }
+            if (s.paneEl) s.paneEl.remove();
+        }
+        await api.terminal.close(id);
         termSessions.delete(id);
+        batchTargets.delete(id);
         if (activeSession === id) {
             activeSession = termSessions.keys().next().value || null;
             if (activeSession) showSession(activeSession);
             else {
-                termBodyEl.querySelectorAll('.wt-term-out').forEach(el => el.remove());
-                const ph = document.createElement('div');
-                ph.className = 'wt-term-placeholder'; ph.id = 'wt-term-placeholder';
-                ph.innerHTML = '<div>未打开会话</div>';
-                termBodyEl.appendChild(ph);
+                const ph = termBodyEl.querySelector('#wt-term-placeholder');
+                if (ph) ph.style.display = '';
                 paintSessionTabs();
+                paintBatchTargets();
             }
         } else {
             paintSessionTabs();
+            paintBatchTargets();
         }
     };
 
     const sendInput = async (text) => {
-        if (!activeSession) { toast('请先从左侧连接一台主机', 'warn'); return; }
+        if (!activeSession || !termSessions.has(activeSession)) { toast('请先从左侧连接一台主机', 'warn'); return; }
         if (!guardWrite('终端交互')) return;
         await api.terminal.input(activeSession, text);
     };
@@ -508,22 +498,47 @@ export async function mount(root) {
         const tab = e.target.closest('[data-sid]');
         if (tab) showSession(tab.dataset.sid);
     });
-    const doSend = () => {
-        const v = inputEl.value;
-        if (!v) { sendInput('\n'); return; }
-        sendInput(v + '\n');
-        inputEl.value = '';
-        autoGrow();
-    };
+    targetEl.addEventListener('click', e => {
+        const chip = e.target.closest('[data-target]');
+        if (!chip) return;
+        const id = chip.dataset.target;
+        if (batchTargets.has(id)) batchTargets.delete(id); else batchTargets.add(id);
+        paintBatchTargets();
+    });
+    root.querySelector('#wt-batch-all').addEventListener('click', () => {
+        termSessions.forEach((_, id) => batchTargets.add(id));
+        paintBatchTargets();
+    });
+    root.querySelector('#wt-batch-none').addEventListener('click', () => {
+        batchTargets.clear();
+        paintBatchTargets();
+    });
+
     const autoGrow = () => {
         inputEl.style.height = 'auto';
         inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px';
+    };
+    // 批量下发：命令同时写入所有勾选会话（各自终端独立回显）
+    const doSend = async () => {
+        const ids = [...batchTargets].filter(id => termSessions.has(id));
+        if (!ids.length) { toast('请先连接主机，并勾选至少一个下发目标', 'warn'); return; }
+        if (!guardWrite('终端交互')) return;
+        const v = inputEl.value;
+        const payload = v === '' ? '\n' : (v.endsWith('\n') ? v : v + '\n');
+        inputEl.value = '';
+        autoGrow();
+        await Promise.all(ids.map(id => api.terminal.input(id, payload)));
     };
     root.querySelector('#wt-send').addEventListener('click', doSend);
     inputEl.addEventListener('input', autoGrow);
     inputEl.addEventListener('keydown', e => {
         if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doSend(); }
     });
+
+    // 容器尺寸变化（窗口缩放/侧栏收起）时重新适配列宽行高
+    const ro = new ResizeObserver(() => { if (activeSession) requestAnimationFrame(fitActive); });
+    ro.observe(termBodyEl);
+    termUnsubs.push(() => ro.disconnect());
 
     /* ---------------- 脚本库浮层 ---------------- */
     const scriptPopEl = root.querySelector('#wt-script-pop');
@@ -595,7 +610,9 @@ export async function mount(root) {
         const chip = e.target.closest('[data-quick]');
         if (chip) {
             const c = quickCmds[Number(chip.dataset.quick)];
-            if (c) { inputEl.value = c.cmd; inputEl.focus(); }
+            if (!c) return;
+            if (activeSession && termSessions.has(activeSession)) sendInput(c.cmd + '\n');
+            else { inputEl.value = c.cmd; autoGrow(); inputEl.focus(); }
         }
     });
     root.querySelector('#wt-quick-add').addEventListener('click', async () => {
@@ -611,12 +628,14 @@ export async function mount(root) {
     function refreshQuick() { root.querySelector('#wt-quick-chips').innerHTML = quickCmdHtml(); }
 
     // 订阅推送（会话数据 / 退出）
-    termUnsubs.push(api.terminal.onData(({ sessionId, chunk }) => appendToSession(sessionId, chunk)));
+    termUnsubs.push(api.terminal.onData(({ sessionId, chunk }) => writeSession(sessionId, chunk)));
     termUnsubs.push(api.terminal.onExit(({ sessionId, message }) => {
         if (termSessions.has(sessionId)) {
-            appendToSession(sessionId, `\r\n\x1b[33m${message || '会话已结束'}\x1b[0m\r\n`);
+            writeSession(sessionId, `\r\n\x1b[33m${message || '会话已结束'}\x1b[0m\r\n`);
             const s = termSessions.get(sessionId);
             if (s) s.closed = true;
+            batchTargets.delete(sessionId);   // 已断开的会话不再作为批量下发目标
+            paintBatchTargets();
         }
     }));
 

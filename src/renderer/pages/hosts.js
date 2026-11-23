@@ -14,14 +14,20 @@ const statusBadge = s =>
     : s === 'offline' ? '<span class="badge red">离线</span>'
     : '<span class="badge gray">未探测</span>';
 
+/** H3C 堡垒机用户名：堡垒机账号/目标主机IP/目标账号 */
+const parseH3cUser = user => {
+    const m = /^([^/]+)\/([^/]+)\/([^/]+)$/.exec(String(user || ''));
+    return m ? { bastionUser: m[1], targetIp: m[2], targetUser: m[3] } : null;
+};
+
 function rowHtml(h) {
     return `
     <tr data-id="${esc(h.id)}">
         <td><input type="checkbox" class="row-check" style="accent-color:var(--primary)"></td>
-        <td><strong>${esc(h.name)}</strong></td>
+        <td><strong>${esc(h.name)}</strong>${h.template === 'h3c' ? ' <span class="badge blue">堡垒机</span>' : ''}</td>
         <td class="mono">${esc(h.ip)}:${esc(h.port)}</td>
         <td>${esc(h.user)}</td>
-        <td>${h.authType === 'password' ? '<span class="badge gray">密码</span>' : '<span class="badge blue">密钥</span>'}</td>
+        <td>${h.authType === 'password' ? `<span class="badge gray">密码</span>${h.hasPassword === false ? ' <span class="badge red">未设密码</span>' : ''}` : '<span class="badge blue">密钥</span>'}</td>
         <td>${(h.tags || []).map(t => `<span class="badge gray">${esc(t)}</span>`).join(' ')}</td>
         <td class="status-cell">${statusBadge(h.status)}</td>
         <td class="muted">${esc(shortTime(h.lastConnectedAt))}</td>
@@ -66,12 +72,21 @@ export function render() {
                 <button class="modal-close" data-close>×</button>
             </div>
             <div class="modal-body">
+                <div class="form-item">
+                    <label>连接模板</label>
+                    <select class="select" id="h-template" style="width:100%">
+                        <option value="plain">普通 SSH</option>
+                        <option value="h3c">H3C 堡垒机（堡垒机账号/目标主机/目标账号）</option>
+                    </select>
+                    <div class="form-hint">H3C 堡垒机登录名格式：堡垒机账号/目标主机IP/目标账号，例如 wuxy1613/10.45.34.48/tomcat</div>
+                </div>
+
                 <div class="form-row">
                     <div class="form-item">
                         <label>主机名</label>
                         <input class="input" id="h-name" placeholder="app-server-03">
                     </div>
-                    <div class="form-item">
+                    <div class="form-item" id="field-ip">
                         <label>IP 地址</label>
                         <input class="input" id="h-ip" placeholder="10.0.12.13">
                     </div>
@@ -79,10 +94,34 @@ export function render() {
                         <label>SSH 端口</label>
                         <input class="input" id="h-port" type="number" value="22">
                     </div>
-                    <div class="form-item">
+                    <div class="form-item" id="field-user">
                         <label>登录用户</label>
                         <input class="input" id="h-user" placeholder="root">
                     </div>
+                </div>
+
+                <div id="h3c-fields" style="display:none">
+                    <div class="form-row">
+                        <div class="form-item">
+                            <label>堡垒机地址</label>
+                            <input class="input mono" id="h3c-bastion-ip" placeholder="10.45.60.16">
+                        </div>
+                        <div class="form-item">
+                            <label>堡垒机账号</label>
+                            <input class="input" id="h3c-bastion-user" placeholder="wuxy1613">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-item">
+                            <label>目标主机 IP</label>
+                            <input class="input mono" id="h3c-target-ip" placeholder="10.45.34.48">
+                        </div>
+                        <div class="form-item">
+                            <label>目标账号</label>
+                            <input class="input" id="h3c-target-user" placeholder="tomcat">
+                        </div>
+                    </div>
+                    <div class="form-hint">登录名将自动拼接为：<span class="mono" id="h3c-preview">堡垒机账号/目标主机IP/目标账号</span>；连接时自动启用 ssh-rsa / ssh-dss 旧算法兼容</div>
                 </div>
 
                 <div class="form-row">
@@ -108,7 +147,7 @@ export function render() {
                 <div class="form-item" id="field-password" style="display:none">
                     <label>登录密码</label>
                     <input class="input" id="h-password" type="password" placeholder="留空表示不修改">
-                    <div class="form-hint">使用 AES-256-GCM 加密后存储于本地库，界面不会回显明文</div>
+                    <div class="form-hint">密码认证必填；使用 AES-256-GCM 加密后存储于本地库，界面不会回显明文（编辑时留空表示不修改）</div>
                 </div>
             </div>
             <div class="modal-footer">
@@ -133,17 +172,29 @@ export async function mount(root) {
         }
     };
 
+    const templateSel = root.querySelector('#h-template');
+
     const openModal = (host) => {
         editingId = host ? host.id : null;
         root.querySelector('#host-modal-title').textContent = host ? `编辑主机 · ${host.name}` : '添加主机';
         root.querySelector('#h-name').value = host ? host.name : '';
-        root.querySelector('#h-ip').value = host ? host.ip : '';
         root.querySelector('#h-port').value = host ? host.port : 22;
-        root.querySelector('#h-user').value = host ? host.user : '';
         root.querySelector('#h-tags').value = host ? (host.tags || []).join(',') : '';
         authSel.value = host ? host.authType : 'key';
         root.querySelector('#h-keypath').value = host ? (host.keyPath || '') : '';
         root.querySelector('#h-password').value = '';
+
+        const isH3c = !!(host && (host.template === 'h3c' || host.legacyAlgos));
+        templateSel.value = isH3c ? 'h3c' : 'plain';
+        const parts = isH3c ? parseH3cUser(host.user) : null;
+        root.querySelector('#h3c-bastion-ip').value = isH3c ? host.ip : '';
+        root.querySelector('#h3c-bastion-user').value = parts ? parts.bastionUser : '';
+        root.querySelector('#h3c-target-ip').value = parts ? parts.targetIp : '';
+        root.querySelector('#h3c-target-user').value = parts ? parts.targetUser : '';
+        root.querySelector('#h-ip').value = host ? host.ip : '';
+        root.querySelector('#h-user').value = host ? host.user : '';
+
+        toggleTemplate();
         toggleAuth();
         modal.classList.add('open');
     };
@@ -154,6 +205,29 @@ export async function mount(root) {
         root.querySelector('#field-key').style.display = isPwd ? 'none' : '';
     };
 
+    const updateH3cPreview = () => {
+        const bu = root.querySelector('#h3c-bastion-user').value.trim();
+        const ti = root.querySelector('#h3c-target-ip').value.trim();
+        const tu = root.querySelector('#h3c-target-user').value.trim();
+        root.querySelector('#h3c-preview').textContent = [bu, ti, tu].filter(Boolean).join('/') || '堡垒机账号/目标主机IP/目标账号';
+    };
+
+    const toggleTemplate = () => {
+        const isH3c = templateSel.value === 'h3c';
+        root.querySelector('#h3c-fields').style.display = isH3c ? '' : 'none';
+        root.querySelector('#field-ip').style.display = isH3c ? 'none' : '';
+        root.querySelector('#field-user').style.display = isH3c ? 'none' : '';
+        toggleAuth();
+        updateH3cPreview();
+    };
+
+    templateSel.addEventListener('change', () => {
+        // 新建堡垒机主机默认密码认证（堡垒机通常为账号口令登录），编辑时保留原认证方式
+        if (templateSel.value === 'h3c' && !editingId) authSel.value = 'password';
+        toggleTemplate();
+    });
+    ['#h3c-bastion-user', '#h3c-target-ip', '#h3c-target-user'].forEach(sel =>
+        root.querySelector(sel).addEventListener('input', updateH3cPreview));
     authSel.addEventListener('change', toggleAuth);
     root.querySelector('#btn-add-host').addEventListener('click', () => openModal(null));
     modal.querySelectorAll('[data-close]').forEach(el => el.addEventListener('click', () => modal.classList.remove('open')));
@@ -165,18 +239,41 @@ export async function mount(root) {
 
     // 保存（新增 / 编辑 → hosts:save）
     root.querySelector('#host-save').addEventListener('click', async () => {
+        const isH3c = templateSel.value === 'h3c';
+        let ip = root.querySelector('#h-ip').value.trim();
+        let user = root.querySelector('#h-user').value.trim();
+        let name = root.querySelector('#h-name').value.trim();
+
+        if (isH3c) {
+            const bastionIp = root.querySelector('#h3c-bastion-ip').value.trim();
+            const bastionUser = root.querySelector('#h3c-bastion-user').value.trim();
+            const targetIp = root.querySelector('#h3c-target-ip').value.trim();
+            const targetUser = root.querySelector('#h3c-target-user').value.trim();
+            if (!bastionIp || !bastionUser || !targetIp || !targetUser) {
+                toast('堡垒机地址、堡垒机账号、目标主机 IP、目标账号均为必填', 'warn'); return;
+            }
+            ip = bastionIp;
+            user = `${bastionUser}/${targetIp}/${targetUser}`;
+            if (!name) name = `H3C-${targetIp}-${targetUser}`;
+        }
+
         const payload = {
             id: editingId || undefined,
-            name: root.querySelector('#h-name').value.trim(),
-            ip: root.querySelector('#h-ip').value.trim(),
+            name,
+            template: isH3c ? 'h3c' : 'plain',
+            legacyAlgos: isH3c,
+            ip,
             port: parseInt(root.querySelector('#h-port').value, 10) || 22,
-            user: root.querySelector('#h-user').value.trim(),
+            user,
             authType: authSel.value,
             keyPath: root.querySelector('#h-keypath').value.trim(),
             tags: root.querySelector('#h-tags').value.split(/[,，]/).map(s => s.trim()).filter(Boolean),
             password: root.querySelector('#h-password').value
         };
         if (!payload.name || !payload.ip || !payload.user) { toast('主机名、IP、登录用户均为必填', 'warn'); return; }
+        if (!editingId && payload.authType === 'password' && !payload.password) {
+            toast('密码认证需填写登录密码（保存后密码不会回显，编辑时留空表示不修改）', 'warn'); return;
+        }
 
         const res = await api.hosts.save(payload);
         if (res && res.id) {
@@ -193,22 +290,26 @@ export async function mount(root) {
         const btn = e.currentTarget;
         btn.disabled = true;
         btn.textContent = '探测中...';
-        const queue = [...hosts];
-        const worker = async () => {
-            while (queue.length) {
-                const host = queue.shift();
-                const cell = tbody.querySelector(`tr[data-id="${host.id}"] .status-cell`);
-                if (cell) cell.innerHTML = '<span class="badge gray">探测中</span>';
-                const res = await api.hosts.test(host.id);
-                const row = tbody.querySelector(`tr[data-id="${host.id}"] .status-cell`);
-                if (row && res && res.host) row.innerHTML = statusBadge(res.host.status);
-            }
-        };
-        await Promise.all(Array.from({ length: Math.min(6, hosts.length) }, worker));
-        await refresh();
-        btn.disabled = false;
-        btn.textContent = '刷新状态';
-        toast('主机状态探测完成', 'success');
+        try {
+            const queue = [...hosts];
+            const worker = async () => {
+                while (queue.length) {
+                    const host = queue.shift();
+                    const cell = tbody.querySelector(`tr[data-id="${host.id}"] .status-cell`);
+                    if (cell) cell.innerHTML = '<span class="badge gray">探测中</span>';
+                    let res = null;
+                    try { res = await api.hosts.test(host.id); } catch (err) { /* 单台失败不阻塞其余 */ }
+                    const row = tbody.querySelector(`tr[data-id="${host.id}"] .status-cell`);
+                    if (row) row.innerHTML = res && res.host ? statusBadge(res.host.status) : '<span class="badge red">探测失败</span>';
+                }
+            };
+            await Promise.all(Array.from({ length: Math.min(6, hosts.length) }, worker));
+            await refresh();
+            toast('主机状态探测完成', 'success');
+        } finally {
+            btn.disabled = false;
+            btn.textContent = '刷新状态';
+        }
     });
 
     // 行内操作
@@ -228,9 +329,14 @@ export async function mount(root) {
             else toast('删除失败', 'danger');
         } else if (act === 'test') {
             btn.textContent = '连接中...';
-            const res = await api.hosts.test(id);
-            btn.textContent = '测试连接';
-            toast(`${host.name}：${res.message || (res.ok ? '连接成功' : '连接失败')}`, res.ok ? 'success' : 'danger');
+            try {
+                const res = await api.hosts.test(id);
+                toast(`${host.name}：${res.message || (res.ok ? '连接成功' : '连接失败')}`, res.ok ? 'success' : 'danger');
+            } catch (err) {
+                toast(`${host.name}：${err.message || '连接测试失败'}`, 'danger');
+            } finally {
+                btn.textContent = '测试连接';
+            }
             await refresh();
         }
     });
