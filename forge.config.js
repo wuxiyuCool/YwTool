@@ -4,8 +4,8 @@ const { FuseV1Options, FuseVersion } = require('@electron/fuses');
 module.exports = {
   packagerConfig: {
     asar: true,
-    // 开发调试目录与内部文档不随安装包分发
-    ignore: (p) => /[\\/](\.workbuddy|\.trae|\.vscode|docs)([\\/]|$)/.test(p) || p.endsWith('.md'),
+    // 开发调试目录、VCS 元数据与内部文档不随安装包分发
+    ignore: (p) => /[\\/](\.workbuddy|\.trae|\.vscode|\.git|docs)([\\/]|$)/.test(p) || p.endsWith('.md'),
   },
   rebuildConfig: {},
   makers: [
