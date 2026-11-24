@@ -397,7 +397,13 @@ export async function mount(root) {
         sendBtn.textContent = n ? `发送到 ${n} 个会话` : '发送';
     };
 
-    const showSession = (id) => {
+    /** 用户是否正在别的输入框（批量框/搜索框等）里打字——此时不要把焦点抢到终端 */
+    const isTypingElsewhere = () => {
+        const a = document.activeElement;
+        return !!(a && (/(INPUT|TEXTAREA|SELECT)/.test(a.tagName) || a.isContentEditable));
+    };
+
+    const showSession = (id, { focusTerm = true } = {}) => {
         activeSession = id;
         termSessions.forEach((s, sid) => { if (s.paneEl) s.paneEl.style.display = sid === id ? 'block' : 'none'; });
         const ph = termBodyEl.querySelector('#wt-term-placeholder');
@@ -405,7 +411,8 @@ export async function mount(root) {
         paintSessionTabs();
         paintBatchTargets();
         const s = termSessions.get(id);
-        if (s) requestAnimationFrame(() => { fitActive(); s.term.focus(); });
+        // 建连完成是异步的：若用户正在批量输入框打字，抢焦点会表现为“输不进去”
+        if (s && focusTerm) requestAnimationFrame(() => { fitActive(); if (!isTypingElsewhere()) s.term.focus(); });
     };
 
     const writeSession = (id, text) => {
@@ -504,14 +511,17 @@ export async function mount(root) {
         const id = chip.dataset.target;
         if (batchTargets.has(id)) batchTargets.delete(id); else batchTargets.add(id);
         paintBatchTargets();
+        inputEl.focus();   // 勾选目标后把焦点还给批量输入框，避免“点完芯片再敲字没反应”
     });
     root.querySelector('#wt-batch-all').addEventListener('click', () => {
         termSessions.forEach((_, id) => batchTargets.add(id));
         paintBatchTargets();
+        inputEl.focus();
     });
     root.querySelector('#wt-batch-none').addEventListener('click', () => {
         batchTargets.clear();
         paintBatchTargets();
+        inputEl.focus();
     });
 
     const autoGrow = () => {
@@ -528,11 +538,20 @@ export async function mount(root) {
         inputEl.value = '';
         autoGrow();
         await Promise.all(ids.map(id => api.terminal.input(id, payload)));
+        inputEl.focus();   // 连续下发时无需再点一次输入框
     };
     root.querySelector('#wt-send').addEventListener('click', doSend);
     inputEl.addEventListener('input', autoGrow);
     inputEl.addEventListener('keydown', e => {
         if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doSend(); }
+    });
+
+    // 点在终端区（含面板内边距）时确保键盘焦点交给 xterm
+    termBodyEl.addEventListener('mousedown', e => {
+        if (e.target.closest('.wt-script-pop')) return;
+        const s = termSessions.get(activeSession);
+        if (!s || s.closed) return;
+        if (!e.target.closest('.xterm')) { e.preventDefault(); s.term.focus(); }
     });
 
     // 容器尺寸变化（窗口缩放/侧栏收起）时重新适配列宽行高

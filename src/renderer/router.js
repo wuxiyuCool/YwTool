@@ -331,7 +331,14 @@ bootstrap(() => {
         return;
     }
 
-    // 优先进入总览（若可见），否则进入首个可用页面
+    /* Electron/Windows 已知坑：原生 window.confirm 关闭后窗口可能不归还键盘焦点——
+ * 点击事件仍生效但输入框点不出光标，alt-tab 切出再切回才恢复（停止/验收/删除后偶发）。
+ * 兜底：任意 pointerdown 时文档失焦就立即 window.focus() 归还焦点 */
+document.addEventListener('pointerdown', () => {
+    if (!document.hasFocus()) window.focus();
+}, true);
+
+// 优先进入总览（若可见），否则进入首个可用页面
     currentDomain = canAccess('dashboard') ? 'server' : list[0].id;
     buildNav();
     buildBreadcrumb();

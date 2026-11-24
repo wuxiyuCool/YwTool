@@ -163,7 +163,17 @@ function demoFallback(channel, data) {
         case 'ai:collectors:delete': return { ok: true, collectors: demo.demoAgentCollectors() };
         case 'ai:collectors:run': return { ok: true, status: 'success', added: 0, skipped: 0 };
         case 'ai:triggers:list': return { ok: true, triggers: demo.demoAgentTriggers };
-        case 'ai:tickets:list': return { ok: true, tickets: demo.demoAgentTickets };
+        case 'ai:tickets:list': {
+            const q = data || {};
+            let rows = demo.demoAgentTickets.slice();
+            if (q.keyword) rows = rows.filter(t => `${t.id} ${t.title} ${(t.payload || {}).detail || ''}`.toLowerCase().includes(String(q.keyword).toLowerCase()));
+            if (q.stage) rows = rows.filter(t => t.stage === q.stage);
+            rows = rows.reverse();
+            const size = Number(q.pageSize) || 20;
+            const pg = Math.max(1, Number(q.page) || 1);
+            return { ok: true, tickets: rows.slice((pg - 1) * size, pg * size), total: rows.length };
+        }
+        case 'ai:tickets:delete': return { ok: true, deleted: 1 };
         case 'ai:tickets:get': {
             const t = demo.demoAgentTickets.find(x => x.id === (data && data.id));
             return t ? { ok: true, ticket: t } : { ok: false, message: '演示模式无该工单' };
@@ -698,7 +708,7 @@ export const api = {
             accept: (id, profileId) => invoke('ai:triggers:accept', { id, profileId })
         },
         tickets: {
-            list: () => invoke('ai:tickets:list'),
+            list: query => invoke('ai:tickets:list', query || {}),
             get: id => invoke('ai:tickets:get', { id }),
             create: payload => invoke('ai:tickets:create', payload),
             accept: id => invoke('ai:tickets:accept', { id }),
@@ -706,7 +716,8 @@ export const api = {
             retry: id => invoke('ai:tickets:retry', { id }),
             confirm: id => invoke('ai:tickets:confirm', { id }),
             drop: id => invoke('ai:tickets:drop', { id }),
-            followup: (id, payload) => invoke('ai:tickets:followup', { id, ...payload })
+            followup: (id, payload) => invoke('ai:tickets:followup', { id, ...payload }),
+            remove: id => invoke('ai:tickets:delete', { id })
         },
         router: { state: () => invoke('ai:router:state') },
         attention: {

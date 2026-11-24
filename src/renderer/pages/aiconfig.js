@@ -187,6 +187,16 @@ export function render() {
                 </div>
                 <div class="form-row" style="margin-bottom:2px">
                     <div class="form-item">
+                        <label>研判提示词角色（route 节点，只改 system 文案不改权限）</label>
+                        <select class="select" id="ag-routerrole"></select>
+                    </div>
+                    <div class="form-item">
+                        <label>执行提示词角色（work 节点，替换基础助手人设）</label>
+                        <select class="select" id="ag-workerrole"></select>
+                    </div>
+                </div>
+                <div class="form-row" style="margin-bottom:2px">
+                    <div class="form-item">
                         <label>并发工作槽</label>
                         <input class="input" id="ag-slots" type="number" min="1" max="4" value="2">
                     </div>
@@ -420,6 +430,13 @@ export async function mount(root) {
         };
         profileOpts('#ag-routerprofile');
         profileOpts('#ag-workerprofile');
+        const roleOpts = (sel, key) => {
+            const cur = agentCfg[key] || '';
+            $(sel).innerHTML = `<option value="">不注入（用内置提示词）</option>` +
+                roleList.map(r => `<option value="${esc(r.id)}" ${r.id === cur ? 'selected' : ''}>${esc(r.name)}${r.builtin ? '（内置）' : ''}</option>`).join('');
+        };
+        roleOpts('#ag-routerrole', 'routerRoleId');
+        roleOpts('#ag-workerrole', 'workerRoleId');
         AGENT_TOGGLES.forEach(t => {
             const el = $(`#ag-${t.key}`);
             if (el) el.checked = !!agentCfg[t.key];
@@ -464,6 +481,8 @@ export async function mount(root) {
             routerMode: $('#ag-routermode').value,
             routerProfileId: $('#ag-routerprofile').value,
             workerProfileId: $('#ag-workerprofile').value,
+            routerRoleId: $('#ag-routerrole').value,
+            workerRoleId: $('#ag-workerrole').value,
             workerSlots: num('#ag-slots', 2),
             ticketMaxRounds: num('#ag-tkrounds', 20),
             ticketMaxMinutes: num('#ag-tkminutes', 30)
@@ -699,6 +718,8 @@ export async function mount(root) {
             roleList = (res && res.roles) || [];
         } catch (err) { roleList = []; }
         paintRoles();
+        // Agent 卡与角色并行加载：角色先到也要刷新节点角色下拉
+        if (agentCfg) paintAgent();
     }
 
     $('#ar-new').addEventListener('click', () => {

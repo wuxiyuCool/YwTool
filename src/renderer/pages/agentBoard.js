@@ -80,6 +80,11 @@ let dbs = [];
 let writeback = null;
 let stageFilter = '';
 let triggerFilter = '';
+let tkKeyword = '';
+let tkPage = 1;
+let tkTotal = 0;
+let tkKwTimer = null;
+const TK_PAGE_SIZE = 20;
 let unsub = null;
 let refreshTimer = null;
 let knownAttention = null;   // null = 首次加载（只登记不通知）
@@ -162,17 +167,21 @@ export function render() {
                 <div class="card-title">工单账本</div>
                 <div class="card-desc">内部派工账本（非工单产品）；结果经人工验收后回写外部 ITSM · 停止 = Mandate 撤回，永不自动复活</div>
             </div>
-            <select class="select" id="ab-stage" style="width:170px">
-                <option value="">全部阶段</option>
-                ${Object.entries(STAGES).map(([k, v]) => `<option value="${k}">${v.label}</option>`).join('')}
-            </select>
+            <div class="toolbar" style="gap:8px">
+                <input class="input" id="ab-tk-kw" style="width:220px" placeholder="搜索标题 / 详情 / 单号">
+                <select class="select" id="ab-stage" style="width:170px">
+                    <option value="">全部阶段</option>
+                    ${Object.entries(STAGES).map(([k, v]) => `<option value="${k}">${v.label}</option>`).join('')}
+                </select>
+            </div>
         </div>
         <div class="table-wrap" style="max-height:460px;overflow:auto">
             <table class="table">
-                <thead><tr><th>标题</th><th>来源</th><th>级别</th><th>阶段</th><th>轮次</th><th>执行档案</th><th>回写</th><th>创建</th><th style="width:190px">操作</th></tr></thead>
+                <thead><tr><th>标题</th><th>来源</th><th>级别</th><th>阶段</th><th>轮次</th><th>执行档案</th><th>回写</th><th>创建</th><th style="width:230px">操作</th></tr></thead>
                 <tbody id="ab-tk-body">${loadingRow(9)}</tbody>
             </table>
         </div>
+        <div class="toolbar" id="ab-tk-pager" style="margin-top:8px"></div>
     </div>
 
     <div class="card">
@@ -218,7 +227,7 @@ export function render() {
 
     <div class="modal-mask" id="ab-create-modal">
         <div class="modal">
-            <div class="modal-header"><h3>手动建单（跳过研判直接派工）</h3><button class="modal-close" data-close>×</button></div>
+            <div class="modal-header"><h3>手动建单（先经路由节点研判）</h3><button class="modal-close" data-close>×</button></div>
             <div class="modal-body">
                 <div class="form-item"><label>标题 *</label><input class="input" id="ab-c-title" maxlength="200" placeholder="如：app-server-01 磁盘清理"></div>
                 <div class="form-item"><label>问题描述 *（作为外部数据包裹注入，不构成额外授权）</label>
@@ -239,9 +248,9 @@ export function render() {
                 </div>
             </div>
             <div class="modal-footer">
-                <span class="muted" style="font-size:12px;margin-right:auto">预算与高危审批沿用「AI 配置」中的 Agent 设置</span>
+                <span class="muted" style="font-size:12px;margin-right:auto">建单后由 route 研判：需执行→生成任务书派 worker；纯咨询→route 直答进待验收</span>
                 <button class="btn btn-ghost" data-close>取消</button>
-                <button class="btn btn-primary" id="ab-c-submit">建单并派工</button>
+                <button class="btn btn-primary" id="ab-c-submit">建单并研判</button>
             </div>
         </div>
     </div>
@@ -322,7 +331,7 @@ async function refresh() {
         const [st, att, tk, trg, col, model, wb] = await Promise.all([
             api.ai.router.state(),
             api.ai.attention.list('open'),
-            api.ai.tickets.list(),
+            api.ai.tickets.list({ stage: stageFilter, keyword: tkKeyword, page: tkPage, pageSize: TK_PAGE_SIZE }),
             api.ai.triggers.list(),
             api.ai.collectors.list(),
             api.ai.model.get(),
@@ -331,6 +340,7 @@ async function refresh() {
         routerState = st && st.ok ? st : null;
         attention = (att && att.attention) || [];
         tickets = (tk && tk.tickets) || [];
+        tkTotal = (tk && tk.total) || 0;
         triggers = (trg && trg.triggers) || [];
         collectors = (col && col.collectors) || [];
         profiles = (model && model.profiles) || [];
@@ -529,12 +539,25 @@ function ticketActions(t) {
     if ((t.reports || []).length && !['person/confirm', 'working/queued', 'routing/brief'].includes(t.stage)) {
         btns.push(`<button class="btn btn-ghost btn-sm" data-write data-module="ai" data-tk-followup="${esc(t.id)}">续派</button>`);
     }
+    // 终态工单可从账本删除（主进程再校验，含级联判断）
+    if (t.status === 'ended') {
+        btns.push(`<button class="btn btn-danger btn-sm" data-write data-module="ai" data-tk-del="${esc(t.id)}">删除</button>`);
+    }
     return btns.join(' ');
 }
 
 function paintTickets() {
     const body = rootEl.querySelector('#ab-tk-body');
-    const list = tickets.filter(t => !stageFilter || t.stage === stageFilter);
+    // 列表已由主进程按 stage/keyword 过滤并分页；页码越界回夹
+    const pages = Math.max(1, Math.ceil(tkTotal / TK_PAGE_SIZE));
+    if (tkPage > pages) tkPage = pages;
+    const pager = rootEl.querySelector('#ab-tk-pager');
+    pager.innerHTML = tkTotal
+        ? `<span class="muted" style="font-size:12px;margin-right:auto">共 ${tkTotal} 条 · 第 ${tkPage}/${pages} 页</span>` +
+        (tkPage > 1 ? `<button class="btn btn-ghost btn-sm" data-tk-page="${tkPage - 1}">上一页</button>` : '') +
+        (tkPage < pages ? `<button class="btn btn-ghost btn-sm" data-tk-page="${tkPage + 1}">下一页</button>` : '')
+        : '';
+    const list = tickets;
     if (!list.length) { body.innerHTML = emptyRow(9, '暂无工单：自动接单、对话接单或手动建单后出现在这里'); return; }
     body.innerHTML = list.map(t => `<tr>
         <td><strong>${esc(t.title)}</strong>${t.manual ? ' <span class="badge purple">人工</span>' : ''}${(t.round || 1) > 1 ? ` <span class="badge blue">第${t.round}轮</span>` : ''}</td>
@@ -943,7 +966,7 @@ export async function mount(root) {
     /* 动态按钮统一委托（具名持有，重复 mount 先退订，避免 #content 复用导致一次点击触发 N 次） */
     if (rootClickHandler) root.removeEventListener('click', rootClickHandler);
     rootClickHandler = e => {
-        const el = e.target.closest('[data-att-answer],[data-att-approve],[data-att-reject],[data-att-wbretry],[data-tk-view],[data-tk-accept],[data-tk-retry],[data-tk-stop],[data-tk-confirm],[data-tk-drop],[data-tk-followup],[data-trg-accept],[data-col-run],[data-col-edit],[data-col-del]');
+        const el = e.target.closest('[data-att-answer],[data-att-approve],[data-att-reject],[data-att-wbretry],[data-tk-view],[data-tk-accept],[data-tk-retry],[data-tk-stop],[data-tk-confirm],[data-tk-drop],[data-tk-followup],[data-tk-del],[data-tk-page],[data-trg-accept],[data-col-run],[data-col-edit],[data-col-del]');
         if (!el) return;
         const d = el.dataset;
         if (d.attAnswer !== undefined) {
@@ -972,6 +995,21 @@ export async function mount(root) {
             ticketOp('drop', d.tkDrop);
         } else if (d.tkFollowup !== undefined) {
             openFollowUp(d.tkFollowup);
+        } else if (d.tkDel !== undefined) {
+            (async () => {
+                if (!guardWrite('删除工单账本记录', 'ai')) return;
+                const t = tickets.find(x => x.id === d.tkDel);
+                if (!confirm(`删除工单「${t ? t.title : d.tkDel}」的账本记录？\n其下全部终态续派子单将级联删除；操作留审计日志，但工单数据不可恢复。`)) return;
+                try {
+                    const res = await api.ai.tickets.remove(d.tkDel);
+                    if (!res || !res.ok) { toast((res && res.message) || '删除失败', 'warn'); return; }
+                    toast(`已删除 ${res.deleted} 条账本记录`, 'success');
+                    refresh();
+                } catch (err) { toast('删除失败：' + err.message, 'danger'); }
+            })();
+        } else if (d.tkPage !== undefined) {
+            tkPage = Number(d.tkPage) || 1;
+            refresh();
         } else if (d.trgAccept !== undefined) {
             (async () => {
                 if (!guardWrite('采纳候选建单', 'ai')) return;
@@ -999,7 +1037,13 @@ export async function mount(root) {
     $('#ab-col-new').addEventListener('click', () => openCollector(null));
     $('#ab-cl-mode').addEventListener('change', paintCollectorMode);
     $('#ab-cl-submit').addEventListener('click', submitCollector);
-    $('#ab-stage').addEventListener('change', e => { stageFilter = e.target.value; paintTickets(); });
+    $('#ab-stage').addEventListener('change', e => { stageFilter = e.target.value; tkPage = 1; refresh(); });
+    $('#ab-tk-kw').addEventListener('input', e => {
+        tkKeyword = e.target.value.trim();
+        tkPage = 1;
+        clearTimeout(tkKwTimer);
+        tkKwTimer = setTimeout(() => refresh(), 400);
+    });
     $('#ab-trg-filter').addEventListener('change', e => { triggerFilter = e.target.value; paintTriggers(); });
     $('#ab-contract-run').addEventListener('click', runContractCheck);
     const wbSave = $('#wb-save');

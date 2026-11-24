@@ -62,6 +62,8 @@ const AGENT_DEFAULTS = {
     routerMode: 'observe',   // D 线接单研判：observe=只记录「本来会接单」不派工 / active=自动派工
     routerProfileId: '',     // 研判档案（空=全局默认）
     workerProfileId: '',     // 自动接单工单默认执行档案（空=全局默认）
+    routerRoleId: '',        // 研判节点绑定提示词角色 id（空=不注入，仅影响 system 文案不改权限）
+    workerRoleId: '',        // 执行节点绑定提示词角色 id（同上）
     workerSlots: 2,          // 并发 worker slot 数（另有 +1 人工交互保留位）
     ticketMaxRounds: 20,     // 工单步数预算（跨回合累计工具轮次）
     ticketMaxMinutes: 30     // 工单墙钟预算（分钟）
@@ -162,6 +164,12 @@ function deleteRole(id) {
     Object.keys(prefs).forEach(u => {
         if (prefs[u] && prefs[u].role === id) { delete prefs[u].role; }
     });
+    // 清理 router/worker 节点对该角色的绑定（运行中 assignment 已取值，不受影响）
+    const agentRaw = store.get('aiAgent');
+    if (agentRaw && typeof agentRaw === 'object') {
+        if (agentRaw.routerRoleId === id) agentRaw.routerRoleId = '';
+        if (agentRaw.workerRoleId === id) agentRaw.workerRoleId = '';
+    }
     store.persist();
     return { ok };
 }
@@ -172,6 +180,14 @@ function resolveSystem(roleId, username) {
     if (!id) return SYSTEM_PROMPT;
     const role = store.list('aiRoles').find(r => r.id === id);
     return (role && role.prompt) || SYSTEM_PROMPT;
+}
+
+/** 角色 id → 提示词原文（空/不存在返回 ''，调用方自行回落）；D 线节点绑定用 */
+function rolePrompt(roleId) {
+    const id = String(roleId || '').trim();
+    if (!id) return '';
+    const role = store.list('aiRoles').find(r => r.id === id);
+    return role ? String(role.prompt || '') : '';
 }
 
 /* ------------------------------------------------------------------
@@ -408,9 +424,9 @@ function saveAgentConfig(payload = {}) {
     }
     next.execApproval = next.execMode === 'approve';
 
-    // D 线路由配置（P7）：研判模式 + 三级档案绑定之 router/worker 级
+    // D 线路由配置（P7）：研判模式 + 三级档案绑定之 router/worker 级 + 节点提示词角色绑定
     if (['observe', 'active'].includes(payload.routerMode)) next.routerMode = payload.routerMode;
-    ['routerProfileId', 'workerProfileId'].forEach(k => {
+    ['routerProfileId', 'workerProfileId', 'routerRoleId', 'workerRoleId'].forEach(k => {
         if (k in payload) next[k] = String(payload[k] || '').trim();
     });
 
@@ -869,6 +885,11 @@ async function fetchWithRetry(url, init, opts = {}) {
             return { res, watchdog: wd };
         } catch (err) {
             if (wd) wd.stop();
+            // fetch failed 只说半句话：把 undici 的 cause（ENOTFOUND/ECONNRESET/TLS 等）拼进消息，工单报告可直接定位网络根因
+            if (err && err.cause && !err.retryable && String(err.message || '').includes('fetch failed')) {
+                const c = err.cause;
+                err.message = `${err.message}：${c.code || c.errno || c.message || '未知底层原因'}`;
+            }
             throw err;
         }
     };
@@ -1215,6 +1236,37 @@ async function chatAgent(messages, options = {}) {
         return false;
     };
 
+    // 强制 tool_choice 统一入口：部分接口（如 DeepSeek 思考模式）对指定 tool_choice 回
+    // 400「Thinking mode does not support this tool_choice」——命中即本轮降级 auto 重试，
+    // 并对本次会话停用后续强制，不能让派工整单挂成「执行异常」
+    const toolChoiceRejected = err => {
+        const m = String((err && err.message) || '');
+        return m.includes('400') && /tool_choice/i.test(m);
+    };
+    let forceUnsupported = false;
+    const callForcedRound = async (choice, streamCall, nonStreamCall) => {
+        const use = forceUnsupported ? null : choice;
+        try {
+            return await streamCall(use);
+        } catch (err) {
+            if (use && toolChoiceRejected(err)) {
+                forceUnsupported = true;
+                if (typeof onRetry === 'function') onRetry('接口不支持强制 tool_choice（如思考模式），本轮已降级 auto 并停用强制');
+                try {
+                    return await streamCall(null);
+                } catch (err2) {
+                    if (err2.streamFallback && !(signal && signal.aborted)) return await nonStreamCall(null);
+                    throw err2;
+                }
+            }
+            if (err.streamFallback && !(signal && signal.aborted)) {
+                if (typeof onRetry === 'function') onRetry(`流式工具解析失败，回落非流式：${err.message}`);
+                return await nonStreamCall(use);
+            }
+            throw err;
+        }
+    };
+
     for (let round = 0; round < maxSteps; round++) {
         if (signal && signal.aborted) break;
         // 连续 3 个工具步骤无播报 → 本轮强制 progress 报告（网关实测支持 tool_choice 指定）；
@@ -1228,16 +1280,9 @@ async function chatAgent(messages, options = {}) {
                 content: '（平台播报要求）你已连续 3 个工具步骤未播报进展。本轮必须调用 agent_report（status=progress）：summary 写清「已完成什么＋关键数据＋下一步」，必须包含新信息；播报后继续执行任务，不要收尾。'
             });
         }
-        let msg;
-        try {
-            msg = await callWithToolsStream(convo, { cfg, model, tools, toolChoice: progressChoice, signal, onRetry, onReasoning, onCompressed });
-        } catch (err) {
-            // D6 兜底：流式解析失败/形状不符 → 该轮回落非流式，风险限制在单轮内
-            if (err.streamFallback && !(signal && signal.aborted)) {
-                if (typeof onRetry === 'function') onRetry(`流式工具解析失败，回落非流式：${err.message}`);
-                msg = await callWithTools(convo, { cfg, model, tools, toolChoice: progressChoice, signal, onRetry, onCompressed });
-            } else throw err;
-        }
+        const msg = await callForcedRound(progressChoice,
+            ch => callWithToolsStream(convo, { cfg, model, tools, toolChoice: ch, signal, onRetry, onReasoning, onCompressed }),
+            ch => callWithTools(convo, { cfg, model, tools, toolChoice: ch, signal, onRetry, onCompressed }));
         const calls = Array.isArray(msg.tool_calls) ? msg.tool_calls : [];
 
         if (!calls.length) {
@@ -1265,14 +1310,9 @@ async function chatAgent(messages, options = {}) {
                     (attempt ? '上一轮仍未给出终态结论。' : '') +
                     (worker ? '必须调用 agent_report，status 用 ready/blocked/failed/dropped 之一（收尾轮不要用 progress）。' : '')
             });
-            let rmsg;
-            try {
-                rmsg = await callWithToolsStream(convo, { cfg, model, tools, toolChoice: rescueChoice, signal, onRetry, onReasoning, onCompressed });
-            } catch (err) {
-                if (err.streamFallback && !(signal && signal.aborted)) {
-                    rmsg = await callWithTools(convo, { cfg, model, tools, toolChoice: rescueChoice, signal, onRetry, onCompressed });
-                } else throw err;
-            }
+            const rmsg = await callForcedRound(rescueChoice,
+                ch => callWithToolsStream(convo, { cfg, model, tools, toolChoice: ch, signal, onRetry, onReasoning, onCompressed }),
+                ch => callWithTools(convo, { cfg, model, tools, toolChoice: ch, signal, onRetry, onCompressed }));
             const rcalls = Array.isArray(rmsg.tool_calls) ? rmsg.tool_calls : [];
             if (rcalls.length) finished = await execCalls(rcalls, steps.length + 1, rmsg.content);
             else if (String(rmsg.content || '').trim()) text = String(rmsg.content).trim();
@@ -1293,15 +1333,10 @@ async function chatAgent(messages, options = {}) {
         if (typeof onRetry === 'function') onRetry('检测到声称已建单但未调用建单工具，强制补调用 propose_ticket');
         convo.push({ role: 'assistant', content: text });
         convo.push({ role: 'user', content: '（系统校验）你刚才声称工单草稿已生成，但平台没有收到 propose_ticket 调用，草稿实际不存在。请立即调用 propose_ticket 真正创建草稿（标题/详情/范围沿用你刚才给出的草稿内容），不要只输出文字。' });
-        let forced;
         const forcedChoice = { type: 'function', function: { name: 'propose_ticket' } };
-        try {
-            forced = await callWithToolsStream(convo, { cfg, model, tools, toolChoice: forcedChoice, signal, onRetry, onReasoning, onCompressed });
-        } catch (err) {
-            if (err.streamFallback && !(signal && signal.aborted)) {
-                forced = await callWithTools(convo, { cfg, model, tools, toolChoice: forcedChoice, signal, onRetry, onCompressed });
-            } else throw err;
-        }
+        const forced = await callForcedRound(forcedChoice,
+            ch => callWithToolsStream(convo, { cfg, model, tools, toolChoice: ch, signal, onRetry, onReasoning, onCompressed }),
+            ch => callWithTools(convo, { cfg, model, tools, toolChoice: ch, signal, onRetry, onCompressed }));
         const forcedCalls = (Array.isArray(forced.tool_calls) ? forced.tool_calls : []).filter(c => c.function?.name === 'propose_ticket');
         if (forcedCalls.length) {
             await execCalls(forcedCalls, steps.length + 1);
@@ -1372,7 +1407,7 @@ module.exports = {
     normalizeProtocol, protocolLabel, getConfig, publicConfig, saveConfig,
     listProfiles, saveProfile, deleteProfile, activateProfile, useProfile, configForProfile,
     getAgentConfig, saveAgentConfig,
-    listRoles, saveRole, deleteRole, resolveSystem,
+    listRoles, saveRole, deleteRole, resolveSystem, rolePrompt,
     getUserPrefs, saveUserPrefs, resolveModel, agentState,
     chatStream, complete, chatAgent, testConnection
 };

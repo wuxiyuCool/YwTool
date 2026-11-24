@@ -314,7 +314,8 @@ function setup(ipcMain) {
 
     ipcMain.handle('ai:triggers:list', (e, { status } = {}) => ({ ok: true, triggers: agentCollect.listTriggers(status) }));
 
-    ipcMain.handle('ai:tickets:list', (e, { stage } = {}) => ({ ok: true, tickets: require('../agentRouter').listTickets(stage) }));
+    ipcMain.handle('ai:tickets:list', (e, { stage, keyword, page, pageSize } = {}) =>
+        ({ ok: true, ...require('../agentRouter').listTickets({ stage, keyword, page, pageSize }) }));
 
     /** 契约自检框：与收集器共用同一校验器（附录 A），AI 生成的爬虫交付前先贴输出自检 */
     ipcMain.handle('ai:contract:validate', (e, { stdout } = {}) => {
@@ -372,6 +373,12 @@ function setup(ipcMain) {
     ipcMain.handle('ai:tickets:followup', (e, { id, objective, title, profileId } = {}) => {
         const result = agentRouter.followUpTicket(String(id || ''), { objective, title, profileId }, operator());
         if (result.ok) log(`续派 AI 工单 ${id} →「${result.ticket.title}」`);
+        return result;
+    });
+
+    ipcMain.handle('ai:tickets:delete', (e, { id } = {}) => {
+        const result = agentRouter.deleteTicket(String(id || ''), operator());
+        if (result.ok) log(`删除 AI 工单账本 ${id}（${result.deleted} 张）`);
         return result;
     });
 

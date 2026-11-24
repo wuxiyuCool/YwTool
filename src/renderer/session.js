@@ -26,6 +26,18 @@ const loginEl = () => document.getElementById('login-screen');
 function showLogin(message = '') {
     const el = loginEl();
     el.style.display = 'flex';
+
+    // 已在登录页时不再重建：会话失效后告警轮询等并发请求会持续 401，
+    // 若每次都重建表单一遍，用户输入会被清空、焦点被 50ms 后的 autofocus 抢走
+    const existing = el.querySelector('#login-form');
+    if (existing) {
+        if (message) {
+            const errEl = el.querySelector('#login-error');
+            if (errEl) errEl.textContent = message;
+        }
+        return;
+    }
+
     el.innerHTML = `
     <div class="login-card">
         <div class="login-brand">
@@ -241,6 +253,8 @@ function showChangePassword() {
 const levelClass = lv => (lv === 'danger' ? 'danger' : lv === 'warn' ? 'warn' : 'info');
 
 async function paintAlerts() {
+    // 未登录（会话失效回到登录页）时不再发请求：避免 401 → showLogin 的循环
+    if (!user) return;
     const badge = document.getElementById('alert-badge');
     const dropdown = document.getElementById('alert-dropdown');
     if (!badge || !dropdown) return;
@@ -315,6 +329,12 @@ function startAlertWatcher() {
     alertTimer = setInterval(paintAlerts, 30000);
 }
 
+/** 会话失效时停止轮询：无会话的定时请求只会不断 401 */
+function stopAlertWatcher() {
+    if (alertTimer) clearInterval(alertTimer);
+    alertTimer = null;
+}
+
 /* ---------------- 对外入口 ---------------- */
 
 export async function bootstrap(onReady) {
@@ -323,6 +343,7 @@ export async function bootstrap(onReady) {
     // 会话失效（如主进程重启）时回到登录页
     setUnauthorizedHandler(() => {
         user = null;
+        stopAlertWatcher();
         showLogin('会话已失效，请重新登录');
     });
 

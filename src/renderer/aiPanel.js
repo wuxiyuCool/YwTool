@@ -1152,16 +1152,24 @@ function bindResizer() {
         document.body.classList.remove('ai-resizing');
         const width = Math.min(Math.max(parseInt(panel.style.width, 10) || DEFAULT_WIDTH, MIN_WIDTH), MAX_WIDTH);
         localStorage.setItem(WIDTH_KEY, String(width));
-        window.removeEventListener('mousemove', onMove);
-        window.removeEventListener('mouseup', onUp);
+        window.removeEventListener('pointermove', onMove);
+        window.removeEventListener('pointerup', onUp);
+        window.removeEventListener('pointercancel', onUp);
+        window.removeEventListener('lostpointercapture', onUp);
     };
 
-    resizerEl.addEventListener('mousedown', e => {
+    // 指针捕获：在窗口外松开也能收到 pointerup，否则 body.ai-resizing
+    // （user-select:none）会残留，全局文本无法选中
+    resizerEl.addEventListener('pointerdown', e => {
+        if (e.button !== 0) return;
         e.preventDefault();
         dragging = true;
         document.body.classList.add('ai-resizing');
-        window.addEventListener('mousemove', onMove);
-        window.addEventListener('mouseup', onUp);
+        window.addEventListener('pointermove', onMove);
+        window.addEventListener('pointerup', onUp);
+        window.addEventListener('pointercancel', onUp);
+        window.addEventListener('lostpointercapture', onUp);
+        try { resizerEl.setPointerCapture(e.pointerId); } catch (err) { /* 指针已失效时退化为窗口内跟踪 */ }
     });
 
     // 双击恢复默认宽度
